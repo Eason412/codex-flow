@@ -25,6 +25,9 @@ const RED = '#F7768E'
 const YELLOW = '#E0AF68'
 const BLUE = '#7AA2F7'
 const PURPLE = '#BB9AF7'
+// 运行中的阶段和 agent 前面转动的点阵，表示正在工作；只在有任务运行且面板显示时转
+const SPIN = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
+const SPIN_MS = 120
 // 按类型区分：flow 紫色，单个 agent 蓝色；按钮文字上不了色，所以在名称前标类型
 const KIND: Record<FlowRun['kind'], [string, string]> = { flow: ['flow', PURPLE], single: ['agent', BLUE] }
 
@@ -38,6 +41,7 @@ const working = atom({ plugin: 'codex-flow', key: 'working' } as const, false)
 const shown = atom({ plugin: 'codex-flow', key: 'shown' } as const, false)
 const opened = atom({ plugin: 'codex-flow', key: 'opened' } as const, [] as string[])
 const auto = atom({ plugin: 'codex-flow', key: 'auto' } as const, false)
+const frame = atom({ plugin: 'codex-flow', key: 'frame' } as const, 0)
 const EMPTY_WINDOWS: WindowStarts = { runs: 0, phases: 0, agents: 0, detailAgents: 0 }
 const windows = atom({ plugin: 'codex-flow', key: 'windows' } as const, EMPTY_WINDOWS)
 // 焦点事件沿用当前绘制的容量；各列起点保存在 $.state。
@@ -58,6 +62,8 @@ const lostSince = new Map<string, number>()
 const instance = crypto.randomUUID()
 // 状态变更保持调用顺序；文件写入另排一条队列，不让慢写入阻塞后续状态变更。
 let panelChanges: Promise<void> = Promise.resolve()
+// 点阵动画的计时器：有任务在跑且面板显示时开，否则关
+let spinTimer: ReturnType<Engine['clock']['every']> | null = null
 let panelWrites: Promise<void> = Promise.resolve()
 let snapshot: PanelRecord['snapshot'] = null
 let latestPanel: Pick<PanelRecord, 'shown' | 'auto' | 'by'> = { shown: false, auto: false, by: 'reload' }
@@ -169,6 +175,15 @@ async function loadResult($: Engine, run: FlowRun, task: FlowTask) {
 }
 
 // fresh：/flow 打开时要自己读一遍，不用别的调用发起、可能已经过时的那次
+async function syncSpinner($: Engine) {
+  const active = (await read($, shown)) && (await read($, runs)).some(r => r.status === 'running')
+  if (active && !spinTimer) spinTimer = $.clock.every(SPIN_MS, () => void update($, frame, n => (n + 1) % SPIN.length))
+  if (!active && spinTimer) {
+    spinTimer.cancel()
+    spinTimer = null
+  }
+}
+
 async function refresh($: Engine, fresh = false) {
   if (inflight && !fresh) return inflight
   if (inflight) await inflight.catch(() => undefined)
@@ -429,7 +444,7 @@ async function stopRun($: Engine, run: FlowRun) {
 }
 
 function glyph(status: string): [string, string | undefined] {
-  if (status === 'running') return ['●', CYAN]
+  if (status === 'running') return ['●', BLUE]
   if (status === 'completed') return ['✓', GREEN]
   if (status === 'partial') return ['◐', YELLOW]
   if (status === 'failed' || status === 'cancelled' || status === 'lost') return ['✗', RED]
@@ -677,8 +692,9 @@ export const register: Register = on => {
     await $.command.register({ name: 'flow', description: '打开 Codex 任务面板' })
     // 重载后让状态行和面板一致
     await changePanel($, async () => applyShown($, await read($, shown), 'reload', await read($, auto)))
-    $.clock.every(REFRESH_MS, () => void refresh($))
-    void refresh($)
+    const tick = () => void refresh($).catch(() => undefined).then(() => syncSpinner($))
+    $.clock.every(REFRESH_MS, tick)
+    tick()
 
     return next(e)
   })
@@ -732,6 +748,7 @@ export const register: Register = on => {
     const list = await read($, runs)
     const at = await read($, nav)
     const hot = await read($, focused)
+    const spinner = SPIN[(await read($, frame)) % SPIN.length]
     const canHide = !list.some(r => r.status === 'running')
     // 整块最宽 100 列，右边留 4 列给引擎的折叠按钮 [-]；高度够时外面加一圈彩色框，和上面的对话分开
     const bandColumns = Math.min(100, Math.max(40, (e.props.bodyColumns || 104) - 4))
@@ -785,6 +802,7 @@ export const register: Register = on => {
     }
 
     const mark = (status: string, text?: string) => {
+      if (status === 'running' && text === undefined) return <Text color={BLUE}>{spinner}</Text>
       const [g, color] = glyph(status)
       return (
         <Text color={color} dimColor={!color}>
@@ -1043,13 +1061,17 @@ export const register: Register = on => {
         : (leftWin.items as FlowRun['phases']).map((p, i) => {
             const ts = tasksOf(run, p.title)
             const me = p.title === phase
+            const live = p.status === 'running'
             const [g, color] = glyph(p.status)
-            const sign = p.status === 'pending' || p.status === 'running' ? String(leftWin.start + i + 1) : g
+            const sign = live ? spinner : p.status === 'pending' ? String(leftWin.start + i + 1) : g
             const count = `${doneOf(ts)}/${ts.length}`
+            // 蓝色只表示运行中；选中的阶段不变暗，其余阶段暗色
+            const tone = live ? BLUE : undefined
+            const dim = !live && !me
             return (
               <Box>
                 <Text color={BLUE}>{level === 'phases' && hot === phaseKey(p.title) ? '❯ ' : '  '}</Text>
-                <Text color={me ? BLUE : sign === g ? color : undefined} dimColor={!me && sign !== g}>
+                <Text color={live ? BLUE : p.status === 'pending' ? undefined : color} dimColor={!live && p.status === 'pending'}>
                   {sign}
                 </Text>
                 <Text> </Text>
@@ -1059,7 +1081,7 @@ export const register: Register = on => {
                       plain
                       key={phaseKey(p.title)}
                       label={fit(p.title, leftWidth - 5 - count.length)}
-                      dimColor={p.status === 'pending' ? true : undefined}
+                      dimColor={dim ? true : undefined}
                       onPress={async () => {
                         const first = ts[0]
                         await moveTo($, { ...await read($, nav), level: 'agents' as const, phase: p.title })
@@ -1067,12 +1089,12 @@ export const register: Register = on => {
                       }}
                     />
                   ) : (
-                    <Text color={me ? BLUE : undefined} dimColor={!me}>
+                    <Text color={tone} dimColor={dim}>
                       {fit(p.title, leftWidth - 5 - count.length)}
                     </Text>
                   )}
                 </Box>
-                <Text color={me ? BLUE : undefined} dimColor={!me}>
+                <Text color={tone} dimColor={dim}>
                   {count}
                 </Text>
               </Box>

@@ -1025,3 +1025,41 @@ test('别的会话里结束的 flow 被本会话续跑后出现在面板上；�
   expect(await ui.find({ text: /上次的 flow/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('运行中的阶段和 agent 用蓝色点阵转动；选中的待开始阶段不变蓝，全部结束后停止转动', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  let frames = 0
+  on('state.set', { plugin: 'codex-flow', key: 'frame' }, async ($, e, next) => {
+    frames++
+    return next(e)
+  })
+  w.dirs = w.dirs.filter(d => d !== 's-1')
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  const SPIN = /^[⣾⣽⣻⢿⡿⣟⣯⣷]$/
+  const spinners = async () => (await ui.findAll({ type: 'Text', text: SPIN })).map(t => [t.text, t.props.color])
+  // 运行中的阶段「审查」和 agent「性能」各一个蓝色点阵，待开始的「复核」只显示序号
+  const first = await spinners()
+  expect(first.length).toBe(2)
+  expect(first.every(([, color]) => color === '#7AA2F7')).toBe(true)
+  expect((await ui.find({ type: 'Text', text: /^2$/ }))?.props.color).toBeUndefined()
+  // 点阵随时间转动
+  await clock.advance(120)
+  const second = await spinners()
+  expect(second.map(([c]) => c)).not.toEqual(first.map(([c]) => c))
+  // 选中待开始的阶段：右栏换成它，但它不变蓝，运行中的阶段仍是蓝色点阵
+  await ui.press({ key: 'p:复核' })
+  expect(await ui.find({ text: ' 复核 · 1 个 agent ' })).toBeDefined()
+  expect((await ui.findAll({ type: 'Text', text: /^复核$/ })).every(t => t.props.color !== '#7AA2F7')).toBe(true)
+  expect((await spinners()).length).toBeGreaterThan(0)
+  // 全部结束：不再有点阵，帧数不再变化
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, status: 'completed', endedAt: iso(254), phases: flowState.phases.map(p => ({ ...p, status: 'completed' })), tasks: flowState.tasks.map(t => ({ ...t, status: 'completed', endedAt: iso(254) })) })
+  await clock.advance(2_000)
+  expect((await spinners()).length).toBe(0)
+  const framesBefore = frames
+  await clock.advance(1_000)
+  expect(frames).toBe(framesBefore)
+  await ui.unmount()
+})

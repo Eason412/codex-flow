@@ -71,6 +71,8 @@ declare module 'claude-code' {
       opened: string[]
       // 面板是任务开始时自动打开的：全部结束 30 秒后自动收起；用户自己 /flow 打开的不自动收
       auto: boolean
+      // 点阵动画当前帧
+      frame: number
     }
   }
 }
