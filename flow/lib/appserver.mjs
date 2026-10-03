@@ -17,7 +17,7 @@ export class AppServer {
   static async start({ cwd, env = process.env, onNotification = () => {} }) {
     const server = new AppServer(cwd, env, onNotification);
     await server.request("initialize", {
-      clientInfo: { title: "codex-flow", name: "codex-flow", version: "0.1.0" },
+      clientInfo: { title: "codex-flow", name: "codex-flow", version: "0.2.0" },
       capabilities: { experimentalApi: false, requestAttestation: false, optOutNotificationMethods: OPT_OUT },
     });
     server.notify("initialized", {});
