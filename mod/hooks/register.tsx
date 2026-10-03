@@ -471,6 +471,13 @@ const WORD: Record<string, string> = {
 
 const tasksOf = (run: FlowRun, phase: string | null) => run.tasks.filter(t => t.phase === phase)
 const doneOf = (tasks: FlowTask[]) => tasks.filter(t => t.status === 'completed').length
+// 正在跑的阶段：一个时写「标题 完成/总数」；按依赖提前开跑、几个阶段同时在跑时写「N 个阶段并行 完成/总数」
+function livePhases(run: FlowRun) {
+  const live = run.phases.filter(p => p.status === 'running')
+  const tasks = live.flatMap(p => tasksOf(run, p.title))
+  if (!live.length) return null
+  return `${live.length === 1 ? live[0]!.title : `${live.length} 个阶段并行`} ${doneOf(tasks)}/${tasks.length}`
+}
 const tokensOf = (tasks: FlowTask[]) => tasks.reduce((sum, t) => sum + (t.tokens ?? 0), 0)
 
 // 和原生一样写成 12.3k / 1.2M
@@ -536,10 +543,8 @@ function runSubtext(run: FlowRun) {
     return parts.join(' · ')
   }
   const parts = [WORD[run.status] ?? run.status]
-  if (run.kind === 'flow' && run.status === 'running') {
-    const phase = run.phases.find(p => p.status === 'running')
-    if (phase) parts.push(`${phase.title} ${doneOf(tasksOf(run, phase.title))}/${tasksOf(run, phase.title).length}`)
-  }
+  const live = run.kind === 'flow' && run.status === 'running' ? livePhases(run) : null
+  if (live) parts.push(live)
   parts.push(`${run.tasks.length} 个 agent`)
   const tokens = tokensOf(run.tasks)
   if (tokens) parts.push(`${formatTokens(tokens)} tok`)
@@ -881,8 +886,8 @@ export const register: Register = on => {
         const task = r.tasks[0]
         if (r.kind === 'single' && task) return agentStats(task)
         const tokens = tokensOf(r.tasks)
-        const phase = r.status === 'running' ? r.phases.find(p => p.status === 'running') : undefined
-        const parts = phase ? [`${phase.title} ${doneOf(tasksOf(r, phase.title))}/${tasksOf(r, phase.title).length}`] : [WORD[r.status] ?? r.status, `${r.tasks.length} 个 agent`]
+        const live = r.status === 'running' ? livePhases(r) : null
+        const parts = live ? [live] : [WORD[r.status] ?? r.status, `${r.tasks.length} 个 agent`]
         if (tokens) parts.push(`${formatTokens(tokens)} tok`)
         return parts.join(' · ')
       }
@@ -1207,7 +1212,8 @@ export const register: Register = on => {
     // 标题行：名称和状态靠左，总 token 和总时长靠右，分别对齐下方 agent 的 token 栏和时长栏
     const boxWidth = leftWidth + rightWidth + (framed ? 7 : 3)
     const totalTokens = tokensOf(run.tasks)
-    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, cells(`${run.name}  ${WORD.running} · 999.9k tok · 99h59m`), footerCells(flowHints, stop, !outer)))
+    const parallel = run.status === 'running' ? run.phases.filter(p => p.status === 'running').length : 0
+    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, cells(`${run.name}  ${WORD.running} · 9 个阶段并行 · 999.9k tok · 99h59m`), footerCells(flowHints, stop, !outer)))
     return shell(PURPLE, flowWidth, (
       <Box flexDirection="column" width={flowWidth}>
         {showTitle && <Box>
@@ -1215,7 +1221,7 @@ export const register: Register = on => {
             <Text bold color={PURPLE} wrap="truncate-end">
               {run.name}
             </Text>
-            <Text dimColor>  {WORD[run.status] ?? run.status}</Text>
+            <Text dimColor wrap="truncate-end">  {WORD[run.status] ?? run.status}{parallel > 1 ? ` · ${parallel} 个阶段并行` : ''}</Text>
           </Box>
           <Box width={TOKEN_SLOT} justifyContent="flex-end">
             <Text dimColor>{totalTokens ? `${formatTokens(totalTokens)} tok` : ''}</Text>

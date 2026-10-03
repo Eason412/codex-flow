@@ -1101,3 +1101,35 @@ test('时长从秒长到小时、token 从千长到百万时 flow 面板宽度�
   expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
   await ui.unmount()
 })
+
+test('按依赖提前开跑时几个阶段同时在跑：都画蓝色星形，标题行写并行数，默认看第一个，切换后看另一个阶段的 agent，宽度不变', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = w.dirs.filter(d => d !== 's-1')
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  const width = async () => { const root = await ui.drawn(); return 'props' in root ? (root.props as { width?: number }).width : undefined }
+  const before = await width()
+  const STAR = /^[✢✳✶✻✽]$/
+  const DOTS = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]$/
+  expect((await ui.findAll({ type: 'Text', text: STAR })).length).toBe(1)
+  // 复核阶段的汇总复核也开跑
+  const both = { ...flowState, phases: flowState.phases.map(p => ({ ...p, status: 'running' })), tasks: flowState.tasks.map(t => (t.label === '汇总复核' ? { ...t, status: 'running', startedAt: iso(200), tokens: 800 } : t)) }
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(both)
+  await clock.advance(2_000)
+  const stars = await ui.findAll({ type: 'Text', text: STAR })
+  expect(stars.length).toBe(2)
+  expect(stars.every(t => t.props.color === '#7AA2F7')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: '  运行中 · 2 个阶段并行' })).toBeDefined()
+  expect(await width()).toBe(before)
+  // 默认右栏是第一个运行中的阶段
+  expect(await ui.find({ text: ' 审查 · 2 个 agent ' })).toBeDefined()
+  expect((await ui.findAll({ type: 'Text', text: DOTS })).length).toBe(1)
+  // 切到复核，看到它正在跑的 agent
+  await ui.press({ key: 'p:复核' })
+  expect(await ui.find({ text: ' 复核 · 1 个 agent ' })).toBeDefined()
+  expect((await ui.findAll({ type: 'Text', text: DOTS })).length).toBe(1)
+  expect(await ui.find({ text: /汇总复核/ })).toBeDefined()
+  await ui.unmount()
+})
