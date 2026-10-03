@@ -64,8 +64,11 @@ node ~/.claude/skills/codex/flow/codex-flow.mjs run <plan.json>
 - `{{phase:标题}}` 换成该阶段所有任务的结果，`{{task:名字}}` 换成单个任务的结果，被引用的任务自动算作前置。前置任务一个都没完成时，这个任务记为跳过，等它的任务也跟着跳过。引用不存在的任务、引用自己所在的阶段或依赖成环时拒绝启动。
 - 长 prompt 写进文件用 `promptFile`；几个任务共用的背景放进文件，用 `{{file:路径}}` 引用。两者都相对计划文件所在目录，在启动时读进计划，不会读到其他任务运行中写出的内容，那些用 `{{task:}}` 或让 Codex 自己读。
 - `cwd` 可以写在任务上，相对计划的 `cwd`；不写就用计划的 `cwd`。
+- `writes`（可选）：任务可以修改的路径或 glob，相对任务的 `cwd`，也可写绝对路径；写目录名包含其下所有文件，`.` 表示整个工作目录，glob 也匹配点开头的文件，单层 `*` 不含子目录；`[]` 表示只读。`checks`（可选）：任务结束后由执行器在任务的 `cwd` 依次运行的验收命令。两者都会写进 prompt 末尾，让 Codex 自己先核对。
+- 写入核对只报告、不改任务状态，失败或被停掉的任务也核对：Codex 改文件记录里范围外的路径记为「越界写入」，这是唯一能确定归属的依据；同一时段 git 工作区里范围外、没有任务认领的变动记为「范围外变动，来源未定」，多半是 shell 命令写的，几个任务同时在一个仓库里写或跑验收时也可能来自别的任务。同一仓库里并行写文件的任务，各自的 `writes` 不要重叠。
+- 验收全部退出码为 0 才算完成；失败或超时（默认 10 分钟，环境变量 `CODEX_FLOW_CHECK_TIMEOUT` 按秒改，超时后先 SIGTERM、3 秒后强制结束，命令留下的后台进程一并结束）记为失败，保留结果，下游按前置未完成处理。输出在运行目录的 `logs/<任务>.checks.log`。续跑时，验收失败或改了 `checks` 的任务复用 Codex 结果、只重跑验收，已完成的下游沿用原结果；只改 `writes` 不重跑，越界记录按新范围重筛。
 - `label` 在整个计划里唯一，会显示给用户，用简短中文名；`brief` 可选，是 `/flow` 详情页里的一句话说明；`schema` 用内置的 `review` / `opinion` / `result` 或 schema 文件路径。模型和 effort 照上面的分工表，只能用 `models.json` 里的。
-- 结束时会收到后台任务通知。读输出里的汇总（也在运行目录的 `summary.txt`）：每个任务下有三行以内的结论，schema 结果写判断、问题数和 summary，md 结果取正文第一段；不用 schema 的任务在 prompt 里要求回复先用三行以内写结论。需要细看时再按结果路径读；汇总里出现「⚠ 实际模型」要告诉用户。
+- 结束时会收到后台任务通知。读输出里的汇总（也在运行目录的 `summary.txt`）：每个任务下有验收结果、越界提醒和三行以内的结论，schema 结果写判断、问题数和 summary，md 结果取正文第一段；不用 schema 的任务在 prompt 里要求回复先用三行以内写结论。需要细看时再按结果路径读；汇总里出现「⚠ 实际模型」要告诉用户。
 - 停整个 flow：用户在 Background 里按 x，或我用 TaskStop。停单个任务：用户在 `/flow` 面板按 x，或 `codex-flow.mjs cancel <runId> <label>`。中途补充要求：`codex-flow.mjs steer <runId> <label> "<内容>"`。看进度：`codex-flow.mjs status [runId]`。
 - 续跑：`codex-flow.mjs run <改过的 plan.json> --resume <runId>`，或不给计划只写 `run --resume <runId>`。没改过且已完成的任务复用结果，改过的任务和等它的任务重跑。
 - 显示部分：输入框上方的任务面板和提醒是 `mod/` 下的 mod，由 `~/.claude/settings.json` 的 `CLAUDE_CODE_PLUGIN_DIRS` 加载到每个会话（之前已开着的会话要重开才加载）。flow 和 run.sh 单个任务开始时面板自动出现（flow 紫色、agent 蓝色）；有任务在跑时面板不能关闭，全部结束后可按 q 关闭，否则自动打开的面板在 30 秒后收起；关闭后同一批任务不再弹出。`/flow` 只负责打开，面板已自动打开时输 `/flow` 会转为手动打开，结束后不自动收起。面板右上角的 `[-]` 是 Claude Code 自带的折叠，折叠后只剩一行「▸ plugin panel hidden」，插件解除不了，用户点那一行或按 ctrl+x ctrl+a 展开。任务很多时各列只显示一段窗口，用「还有 N 个」翻动。按 `after` 提前开跑时几个阶段会同时显示蓝色星形，标题行写「N 个阶段并行」，默认看第一个运行中的阶段，↑/↓ 切换。面板显示时状态行（`flow/statusline.mjs`，ccstatusline 调用）不画 codex 那一行，靠 mod 写的 `~/.claude/codex-flow/panel-<会话>.json` 判断。改 mod 后跑 `claude plugin validate` 和 `claude plugin test`；改执行器后跑 `node --test flow/tests/`。

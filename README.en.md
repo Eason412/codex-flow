@@ -19,6 +19,7 @@ Current version: [V0.1.0](https://github.com/Eason412/codex-flow/releases/tag/V0
 - 📺 **Live panel above the prompt**: The panel appears as soon as a task starts, laid out like Claude's Workflow detail view: phases on the left, agents on the right, each row with model, effort, tokens and elapsed time. Step in to read results.
 - 🔢 **Live token usage**: Flow tasks update after each Codex reply; single tasks are read from the Codex session log every 2 seconds. Resuming or forking an earlier conversation counts only the current run.
 - ⏹️ **Native stop and completion notices**: A flow starts from a background Bash command, so pressing x in the Background list stops it, and Claude is notified when it ends. Single tasks stop with x in the panel, and `steer` adds instructions to a running task.
+- 🛡️ **Write scope and acceptance checks**: A task can declare the paths it may change and the commands that accept its work. Afterwards the executor checks Codex's file-change records and the git worktree, flags writes outside the scope, and runs the checks in the task's directory; the task completes only if they all pass.
 - ♻️ **Resume with cached results**: With `--resume`, finished tasks whose prompts are unchanged reuse their results; only changed tasks and the tasks that depend on them run again. The final summary gives each task a conclusion of up to three lines, so the result files rarely need opening.
 - 🔍 **Verified models**: The model and effort in each report come from Codex's own session log, with ⚠ when they differ from the request or cannot be verified.
 - ⏱️ **15-minute check-ins**: Each time a task passes another 15 minutes, the mod asks Claude in the conversation to read the log and report to the user. Tasks are never stopped automatically, and elapsed time alone never marks a task as stuck.
@@ -103,7 +104,7 @@ Day to day, ask Claude to "hand it to Codex", or describe several tasks that can
      {"label": "summary", "model": "gpt-6-astra", "effort": "high", "prompt": "Recheck:\n{{phase:write}}"}]}]}
 ```
 
-`review-a` has `after`, so it starts as soon as `doc-a` finishes; `summary` has none and waits for the whole write phase. `promptFile` and `{{file:}}` are relative to the plan file's directory, and a task's `cwd` is relative to the plan's `cwd`.
+`review-a` has `after`, so it starts as soon as `doc-a` finishes; `summary` has none and waits for the whole write phase. `promptFile` and `{{file:}}` are relative to the plan file's directory, and a task's `cwd` is relative to the plan's `cwd`. A task can also limit what it changes with `"writes": ["README.md"]` and name acceptance commands with `"checks": ["<command>"]`.
 
 | Command | Action |
 | --- | --- |
