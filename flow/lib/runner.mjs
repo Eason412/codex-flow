@@ -213,6 +213,14 @@ function scheduleTasks(dir, state, planTasks, deps) {
             changed = true;
             continue;
           }
+          // 隔离任务的改动只有合回成功（completed）才在主工作区里，没合回就不能让下游当作已经有了
+          const unmerged = before.filter((t) => planTasks.get(t.label).isolation === "worktree" && t.status !== "completed");
+          if (unmerged.length) {
+            task.status = "skipped";
+            task.error = `隔离的前置任务没有合回：${unmerged.map((t) => t.label).join("、")}`;
+            changed = true;
+            continue;
+          }
           const t = planTasks.get(task.label);
           const taskCwd = t.cwd ?? cwd;
           // 写入范围和运行中的任务（或排队中的合回）重叠就先等着，前者结束时会再走到这里

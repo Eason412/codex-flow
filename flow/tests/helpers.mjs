@@ -10,9 +10,13 @@ import { fileURLToPath } from 'node:url';
 
 export const skill = fileURLToPath(new URL('../..', import.meta.url));
 export const cli = path.join(skill, 'flow/codex-flow.mjs');
-export const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-flow-test-')));
-process.env.CODEX_FLOW_HOME = path.join(root, 'flow');
-process.env.CODEX_HOME = path.join(root, 'codex');
+// 经 index.js 和 flow.test.mjs 同进程运行时沿用它的临时目录（执行器模块已按它的环境加载）
+const shared = process.env.CODEX_FLOW_TEST_SHARED === '1';
+export const root = shared ? path.dirname(process.env.CODEX_FLOW_HOME) : fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-flow-test-')));
+if (!shared) {
+  process.env.CODEX_FLOW_HOME = path.join(root, 'flow');
+  process.env.CODEX_HOME = path.join(root, 'codex');
+}
 delete process.env.CLAUDE_CODE_SESSION_ID;
 const stateLib = await import('../lib/state.mjs');
 export const { RUNS, readJson, writeJson, statePath } = stateLib;
