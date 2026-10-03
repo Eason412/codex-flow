@@ -24,6 +24,9 @@ export function overallStatus(tasks) {
   return "partial";
 }
 
+// 注入的上游结果超过这个字数就提示改用 {{path:}}：大段结果塞进任务说明会挤占上下文
+const INJECT_WARN = 8000;
+
 const GLYPH = { completed: "✓", failed: "✗", cancelled: "■", skipped: "○", pending: "○", running: "●", lost: "✗" };
 export const WORD = { completed: "完成", partial: "部分完成", failed: "失败", cancelled: "已停止", running: "运行中", lost: "进程已消失" };
 
@@ -91,6 +94,10 @@ export function renderSummary(dir, state) {
     if (t.checkResults?.length && t.status === "completed") lines.push(`    验收 ${t.checkResults.length}/${t.checks?.length ?? t.checkResults.length} 通过`);
     if (t.scope?.outside?.length) lines.push(`    ⚠ 越界写入：${list(t.scope.outside)}`);
     if (t.scope?.unclaimed?.length) lines.push(`    ⚠ 范围外变动，来源未定${t.scope.duringChecks ? "（期间有其他任务在跑验收）" : ""}：${list(t.scope.unclaimed)}`);
+    for (const c of t.collisions ?? []) lines.push(`    ⚠ 和「${c.with}」同时改了：${list(c.files)}${c.rechecked ? "（已重新验收）" : ""}`);
+    if (t.reused && t.stale?.length) lines.push(`    ⚠ 复用的结果之后这些文件改过：${list(t.stale)}；要重跑加 --rerun ${t.label}`);
+    if (t.staleRerun?.length) lines.push(`    上次结果之后这些文件改过，已重跑：${list(t.staleRerun)}`);
+    if ((t.input?.upstream?.chars ?? 0) > INJECT_WARN) lines.push(`    注入上游结果 ${t.input.upstream.chars} 字，可改用 {{path:任务名}} 让 Codex 自己读`);
     let conclusion = [];
     try {
       conclusion = conclusionOf(dir, t);
@@ -99,6 +106,7 @@ export function renderSummary(dir, state) {
     }
     for (const line of conclusion) lines.push(`    ${line}`);
   }
+  for (const note of state.notes ?? []) lines.push(`⚠ ${note}`);
   lines.push(`运行目录: ${dir}`);
   if (state.kind === "flow" && status !== "completed") lines.push(`续跑: node ${path.join(here, "codex-flow.mjs")} run --resume ${state.runId}`);
   return `${lines.join("\n")}\n`;

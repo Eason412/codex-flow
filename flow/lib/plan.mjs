@@ -1,9 +1,11 @@
 // 读取、展开和校验计划，计算任务依赖，并在发给 Codex 前填入引用与约束。
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { checkModelEffort, readJson } from "./state.mjs";
 import { die, here } from "./runtime.mjs";
+import { estimate } from "./meter.mjs";
 
 const SCHEMAS = path.resolve(here, "..", "schemas");
 
@@ -17,33 +19,44 @@ export function loadSchema(name) {
 
 const expandHome = (p) => String(p).replace(/^~(?=$|[\/\\])/, os.homedir());
 
+export const sha1 = (text) => crypto.createHash("sha1").update(text).digest("hex");
+
 // 读计划并展开：promptFile 和 {{file:路径}} 相对计划文件所在目录读进 prompt，plan.cwd 相对当前目录、任务 cwd 相对 plan.cwd 换成绝对路径。
-// 展开后的计划存进运行目录，续跑不再依赖这些文件；要读其他任务写出的文件，用 {{task:}} 或让 Codex 自己读
+// 展开后的计划存进运行目录，续跑不再依赖这些文件；要读其他任务写出的文件，用 {{task:}} 或让 Codex 自己读。
+// 每个引入的文件记进任务的 sources（路径、内容摘要、字数）：计量资料占多少，不带计划续跑时提示来源改过
 export function loadPlan(planFile) {
   const plan = readJson(planFile);
   if (!plan) die(`读不到计划: ${planFile}`);
   const base = path.dirname(path.resolve(planFile));
-  const read = (p, what) => {
+  let sources;
+  const read = (p, what, kind) => {
     const file = path.resolve(base, expandHome(p));
+    let text;
     try {
-      return fs.readFileSync(file, "utf8");
+      text = fs.readFileSync(file, "utf8");
     } catch {
       die(`${what}读不到: ${file}`);
     }
+    const inlined = kind === "file" ? text.trimEnd() : text;
+    sources.push({ kind, path: file, sha1: sha1(text), chars: [...inlined].length, est: +estimate(inlined).toFixed(2) });
+    return text;
   };
   plan.cwd = path.resolve(expandHome(plan.cwd ?? process.cwd()));
   for (const phase of Array.isArray(plan.phases) ? plan.phases : []) {
     for (const task of Array.isArray(phase.tasks) ? phase.tasks : []) {
+      sources = [];
       if (task.promptFile !== undefined) {
         if (task.prompt !== undefined) die(`任务「${task.label}」的 prompt 和 promptFile 只能写一个`);
-        task.prompt = read(task.promptFile, `任务「${task.label}」的 promptFile `);
+        task.prompt = read(task.promptFile, `任务「${task.label}」的 promptFile `, "promptFile");
         delete task.promptFile;
       }
       if (typeof task.prompt === "string") {
         // {{file:}} 引入的是资料，其中的 {{task:}} {{phase:}} 等原样保留：先换成占位，发给 Codex 前再换回
-        task.prompt = task.prompt.replace(/\{\{file:([^}]+)\}\}/g, (_, p) => read(p.trim(), `任务「${task.label}」引用的文件 `).trimEnd().replaceAll("{{", LITERAL_BRACES));
+        task.prompt = task.prompt.replace(/\{\{file:([^}]+)\}\}/g, (_, p) => read(p.trim(), `任务「${task.label}」引用的文件 `, "file").trimEnd().replaceAll("{{", LITERAL_BRACES));
       }
       if (task.cwd !== undefined) task.cwd = path.resolve(plan.cwd, expandHome(task.cwd));
+      if (sources.length) task.sources = sources;
+      else delete task.sources;
     }
   }
   return plan;
@@ -68,7 +81,7 @@ export function validatePlan(plan) {
       if (task.after !== undefined && !(Array.isArray(task.after) && task.after.every((n) => typeof n === "string" && n.trim()))) {
         die(`任务「${task.label}」的 after 要写成任务名或阶段标题的数组`);
       }
-      for (const key of ["writes", "checks"]) {
+      for (const key of ["writes", "reads", "checks"]) {
         if (task[key] !== undefined && !(Array.isArray(task[key]) && task[key].every((n) => typeof n === "string" && n.trim()))) {
           die(`任务「${task.label}」的 ${key} 要写成字符串数组`);
         }
@@ -79,7 +92,7 @@ export function validatePlan(plan) {
 }
 
 // 每个任务等哪些任务：没写 after 就等上一阶段全部任务（阶段间顺序执行）；写了 after 就只等列出的任务或阶段，前置完成即开跑。
-// prompt 里 {{task:}} {{phase:}} 引用的任务自动加进来，保证引用到的结果已经出来
+// prompt 里 {{task:}} {{phase:}} {{path:}} 引用的任务自动加进来，保证引用到的结果已经出来
 function dependencies(plan) {
   const byPhase = new Map(plan.phases.map((p) => [p.title, p.tasks.map((t) => t.label)]));
   const labels = new Set(plan.phases.flatMap((p) => p.tasks.map((t) => t.label)));
@@ -94,7 +107,7 @@ function dependencies(plan) {
       };
       if (task.after === undefined) for (const label of index > 0 ? byPhase.get(plan.phases[index - 1].title) : []) set.add(label);
       else for (const name of task.after) add(name.trim(), null, "after");
-      for (const [, kind, name] of task.prompt.matchAll(/\{\{(task|phase):([^}]+)\}\}/g)) add(name.trim(), kind, `{{${kind}:}}`);
+      for (const [, kind, name] of task.prompt.matchAll(/\{\{(task|phase|path):([^}]+)\}\}/g)) add(name.trim(), kind === "path" ? "task" : kind, `{{${kind}:}}`);
       if (set.has(task.label)) die(`任务「${task.label}」不能等待自己（after 或引用指向了自己或所在阶段）`);
       deps.set(task.label, [...set]);
     }
@@ -116,8 +129,9 @@ function dependencies(plan) {
 const LITERAL_BRACES = "\u0001";
 export const literal = (text) => text.replaceAll(LITERAL_BRACES, "{{");
 
-// {{phase:标题}} 换成该阶段所有任务的结果，{{task:任务名}} 换成单个任务的结果
-export function renderPrompt(prompt, state, dir) {
+// {{phase:标题}} 换成该阶段所有任务的结果，{{task:任务名}} 换成单个任务的结果，{{path:任务名}} 换成结果文件的绝对路径（下游自己读，不占任务说明）。
+// injected 收集注入的上游结果原文，供计量
+export function renderPrompt(prompt, state, dir, injected = []) {
   const resultOf = (task) => {
     if (task.status !== "completed" || !task.result) return `（任务「${task.label}」未完成：${task.status}）`;
     try {
@@ -126,12 +140,22 @@ export function renderPrompt(prompt, state, dir) {
       return `（任务「${task.label}」的结果文件读不到）`;
     }
   };
+  const inject = (text) => {
+    injected.push(text);
+    return text;
+  };
+  const find = (label) => state.tasks.find((t) => t.label === label.trim());
   return prompt
     .replace(/\{\{phase:([^}]+)\}\}/g, (_, title) =>
-      state.tasks.filter((t) => t.phase === title.trim()).map((t) => `### ${t.label}\n${resultOf(t)}`).join("\n\n"))
+      inject(state.tasks.filter((t) => t.phase === title.trim()).map((t) => `### ${t.label}\n${resultOf(t)}`).join("\n\n")))
     .replace(/\{\{task:([^}]+)\}\}/g, (_, label) => {
-      const task = state.tasks.find((t) => t.label === label.trim());
-      return task ? resultOf(task) : `（没有名为「${label}」的任务）`;
+      const task = find(label);
+      return task ? inject(resultOf(task)) : `（没有名为「${label}」的任务）`;
+    })
+    .replace(/\{\{path:([^}]+)\}\}/g, (_, label) => {
+      const task = find(label);
+      if (!task) return `（没有名为「${label}」的任务）`;
+      return task.status === "completed" && task.result ? path.join(dir, task.result) : `（任务「${task.label}」未完成：${task.status}）`;
     })
     .replaceAll(LITERAL_BRACES, "{{");
 }
