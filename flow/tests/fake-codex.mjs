@@ -17,7 +17,7 @@ if (args[0] === 'app-server') {
     if (request.method === 'turn/start') result = { turn: { id: 'fake-flow-turn' } };
     send({ id: request.id, result });
     if (request.method === 'turn/start') {
-      // prompt 里的标记控制假结果：SLOW 慢 1.5 秒（FAKE_SLOW_MS 可改），FAIL 失败，CWD 回报工作目录，JSON 回 review 格式，CMD 先跑一条命令
+      // prompt 里的标记控制假结果：SLOW 慢 1.5 秒（FAKE_SLOW_MS 可改），FAIL 失败，CWD 回报工作目录，JSON 回 review 格式，CMD 先跑一条命令，CMDHANG 只发命令开始、不发结束
       const prompt = request.params?.input?.[0]?.text ?? '';
       let text = '假 flow 结果';
       if (prompt.includes('CWD')) text = `cwd=${process.cwd()}`;
@@ -32,7 +32,7 @@ if (args[0] === 'app-server') {
       if (prompt.includes('CMD')) {
         const item = { type: 'commandExecution', id: 'cmd-1', command: '/bin/zsh -lc "echo \\"hi\\" && ls"' };
         send({ method: 'item/started', params: { item: { ...item, status: 'inProgress' } } });
-        send({ method: 'item/completed', params: { item: { ...item, status: 'completed', exitCode: 0 } } });
+        if (!prompt.includes('CMDHANG')) send({ method: 'item/completed', params: { item: { ...item, status: 'completed', exitCode: 0 } } });
       }
       setTimeout(() => {
         for (const [, rel] of prompt.matchAll(/(?<!BAD)PATCH:(\S+)/g)) {

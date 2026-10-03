@@ -219,6 +219,7 @@ export function activityOf(method, item, cwd) {
 const CHECK_TIMEOUT = (Number(process.env.CODEX_FLOW_CHECK_TIMEOUT) > 0 ? Number(process.env.CODEX_FLOW_CHECK_TIMEOUT) : 600) * 1000;
 const CHECK_LOG_LIMIT = 1 << 20; // 每条验收命令最多记 1MB 输出
 const HASH_LIMIT = 8 << 20; // 超过 8MB 的文件用大小和修改时间代替内容摘要
+const SCOPE_SETTLE_MS = 300; // 拍结束快照前等其他任务的改文件记录到齐
 const checkProcs = new Set();
 const touchedBy = new Map(); // 任务名 → Codex 改文件记录里的路径，判断范围外变动来自哪个任务
 const checkWindows = []; // 验收命令运行的时段，验收产物可能被同时段的其他任务看成范围外变动
@@ -430,12 +431,24 @@ async function runTask(dir, state, task, prompt, cwd) {
   // 面板的过程区：最近几步和累计数，随 token 一起每秒存一次
   task.recent = [];
   task.activity = { commands: 0, edits: 0, messages: 0 };
+  delete task.turnEnded;
   let dirty = false;
   const note = (entry) => {
     const old = entry.id ? task.recent.find((e) => e.id === entry.id) : null;
     if (old) Object.assign(old, entry);
     else task.recent = [...task.recent, entry].slice(-RECENT_LIMIT);
     dirty = true;
+  };
+  const steerPrefix = `${fileSafe(task.label)}.steer.`;
+  const pendingSteers = () => (fs.existsSync(control) ? fs.readdirSync(control) : []).filter((n) => n.startsWith(steerPrefix) && n.endsWith(".txt"));
+  // Codex 结束后还没取走的插话不会再发：改名为 .unsent，并在过程里写明，不让它无声消失
+  const dropSteers = () => {
+    for (const name of pendingSteers()) {
+      const file = path.join(control, name);
+      fs.renameSync(file, `${file}.unsent`);
+      note({ kind: "note", text: "插话没有送达：任务已结束" });
+      log({ method: "steer-unsent", file: name });
+    }
   };
   let lastMessage = null;
   let resolveTurn;
@@ -502,6 +515,7 @@ async function runTask(dir, state, task, prompt, cwd) {
     task.error = `启动失败：${error.message}`;
     task.endedAt = nowIso();
     log({ method: "start-failed", error: error.message });
+    dropSteers();
     save();
     return;
   }
@@ -520,23 +534,24 @@ async function runTask(dir, state, task, prompt, cwd) {
         log({ method: "stop-requested" });
         await server.request("turn/interrupt", { threadId: task.threadId, turnId: task.turnId });
       }
-      const prefix = `${fileSafe(task.label)}.steer.`;
-      for (const name of fs.existsSync(control) ? fs.readdirSync(control) : []) {
-        if (!name.startsWith(prefix) || !name.endsWith(".txt")) continue;
+      for (const name of pendingSteers()) {
         const file = path.join(control, name);
-        const text = fs.readFileSync(file, "utf8");
+        // 刚写的文件下一秒再取，免得读到写了一半的内容
+        if (Date.now() - fs.statSync(file).mtimeMs < 500) continue;
+        const text = fs.readFileSync(file, "utf8").trim();
         fs.renameSync(file, `${file}.sent`);
+        if (!text) continue;
         try {
           await server.request("turn/steer", {
             threadId: task.threadId, expectedTurnId: task.turnId,
             input: [{ type: "text", text, text_elements: [] }],
           });
         } catch (error) {
-          note({ kind: "note", text: `插话没有送达：${error.message}` });
+          note({ kind: "note", text: oneLine(`插话没有送达：${error.message}`) });
           throw error;
         }
         log({ method: "steer-sent", chars: text.length });
-        note({ kind: "steer", text });
+        note({ kind: "steer", text: oneLine(text) });
       }
     } catch (error) {
       log({ method: "control-error", error: error.message });
@@ -547,6 +562,13 @@ async function runTask(dir, state, task, prompt, cwd) {
   clearInterval(poll);
   servers.delete(server);
   server.close();
+  // Codex 已结束：面板据 turnEnded 收起插话框；被中断时没收到结束的命令记为失败
+  task.turnEnded = true;
+  for (const step of task.recent) if (step.status === "running") step.status = "failed";
+  dropSteers();
+  save();
+  // 并行任务刚写的文件，改文件记录可能还在管道里没处理；稍等再拍结束快照，免得被记成来源未定
+  if (task.writes) await new Promise((resolve) => setTimeout(resolve, SCOPE_SETTLE_MS));
 
   if (end.status === "completed") {
     let text = lastMessage ?? "";
@@ -574,6 +596,8 @@ async function runTask(dir, state, task, prompt, cwd) {
   }
   // 失败或被停掉的任务也可能已经写了文件
   if (end.status !== "completed" && task.writes) task.scope = scopeReport(state, task, cwd, touched, before, before ? gitSnapshot(cwd) : null);
+  // 面板刷新有几秒延迟，验收期间可能又写进来插话
+  dropSteers();
   task.endedAt = nowIso();
   save();
 }
