@@ -13,6 +13,12 @@ export type FlowTask = {
   // 续跑时直接用了上次的结果
   reused: boolean
   tokens: number | null
+  // 最近几步：命令、改文件、消息、搜索、插话；旧记录和单个 agent 没有，为空
+  recent: { kind: string; text: string; status?: string }[]
+  // 累计数；edits 是改文件操作的次数，不是文件数
+  activity: { commands: number; edits: number; messages: number } | null
+  // 运行中且正在跑验收命令：Codex 已结束，插话送不到
+  checking: boolean
 }
 
 export type FlowRun = {
@@ -73,6 +79,8 @@ declare module 'claude-code' {
       auto: boolean
       // 运行中星形动画的当前帧
       frame: number
+      // 插话框的轮次：发出后换一个新框，清空已发的文字
+      steerRound: number
     }
   }
 }

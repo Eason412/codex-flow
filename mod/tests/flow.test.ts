@@ -187,7 +187,8 @@ test('任务开始时面板自动出现在输入框上方：flow 紫色、agent 
     expect(await ui.find({ text: '12.3k tok' })).toBeDefined()
     expect(await ui.find({ text: '3k tok' })).toBeDefined()
     expect(await ui.find({ text: '复用' })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 't:r-1:性能' })).toBeUndefined()
+    // 右栏的 agent 也随时可选，不必先进阶段
+    expect(await ui.find({ type: 'Button', key: 't:r-1:性能' })).toBeDefined()
 
     // Enter 阶段进入右栏选 agent；返回回到阶段栏
     await ui.press({ key: 'p:复核' })
@@ -204,7 +205,7 @@ test('任务开始时面板自动出现在输入框上方：flow 紫色、agent 
     expect(await ui.find({ text: '没有发现注入问题。' })).toBeDefined()
     // 已完成的 agent 没有停止键
     expect(await ui.find({ type: 'Button', key: 'stop' })).toBeUndefined()
-    await ui.press({ key: 't:r-1:性能' })
+    await ui.press({ key: 'a:r-1:性能' })
     expect(await ui.find({ type: 'Button', key: 'stop' })).toBeDefined()
     expect(await ui.find({ text: '运行中，结果出来后显示在这里。' })).toBeDefined()
     await ui.press({ key: 'stop' })
@@ -694,18 +695,18 @@ for (const maxRows of [24, 10]) {
     await ui.press({ key: 't:r-1:agent-0' })
     expect(await ui.find({ key: 'more:detailAgents:down' })).toBeDefined()
     await $.ui.focus({ component: 'AbovePrompt', requestId, plugin: 'codex-flow', element: 'more:detailAgents:down', origin: { kind: 'person' } })
-    expect(await ui.find({ key: `t:r-1:agent-${size}` })).toBeDefined()
-    expect(w.focuses.at(-1)).toBe(`t:r-1:agent-${size}`)
+    expect(await ui.find({ key: `a:r-1:agent-${size}` })).toBeDefined()
+    expect(w.focuses.at(-1)).toBe(`a:r-1:agent-${size}`)
     expect(w.windowStarts.detailAgents).toBe(1)
     expect(await ui.find({ text: ` agent-${size} · ${size + 1}/20 ` })).toBeDefined()
-    await $.ui.focus({ component: 'AbovePrompt', requestId, plugin: 'codex-flow', element: `t:r-1:agent-${size}`, origin: { kind: 'plugin', name: 'codex-flow' } })
+    await $.ui.focus({ component: 'AbovePrompt', requestId, plugin: 'codex-flow', element: `a:r-1:agent-${size}`, origin: { kind: 'plugin', name: 'codex-flow' } })
     expect(await ui.findAll({ type: 'Button', text: /^agent-\d+$/ })).toHaveLength(size)
     expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(maxRows)
     await ui.unmount()
   })
 }
 
-test('阶段栏右侧只画暗色「还有」，运行项在窗口内；切换阶段重置起点', async ($, on) => {
+test('阶段栏时右栏的 agent 也可选：窗口跟着运行项，「还有」可翻页；切换阶段重置起点', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
   w.dirs = ['r-1']
@@ -716,16 +717,13 @@ test('阶段栏右侧只画暗色「还有」，运行项在窗口内；切换�
   await clock.advance(2_000)
   const requestId = 'passive-agents'
   const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', requestId, props: PROPS })
-  expect(await ui.findAll({ type: 'Button', text: /还有/ })).toHaveLength(0)
-  expect(await ui.findAll({ type: 'Text', text: /^agent-\d+$/ })).toHaveLength(12)
-  expect((await ui.find({ type: 'Text', text: /^agent-18$/ }))?.props.dimColor).toBe(false)
-  const more = await ui.findAll({ type: 'Text', text: /还有 \d+ 个/ })
-  expect(more).toHaveLength(2)
-  expect(more.every(row => row.props.dimColor === true)).toBe(true)
+  expect(await ui.findAll({ type: 'Button', text: /^agent-\d+$/ })).toHaveLength(12)
+  expect(await ui.find({ type: 'Button', text: /^agent-18$/ })).toBeDefined()
+  expect((await ui.findAll({ type: 'Button', text: /还有 \d+ 个/ })).map(b => b.key)).toEqual(['more:agents:up', 'more:agents:down'])
   expect(w.windowStarts.agents).toBe(7)
   await $.ui.focus({ component: 'AbovePrompt', requestId, plugin: 'codex-flow', element: 'p:复核', origin: { kind: 'person' } })
-  expect(await ui.find({ type: 'Text', text: /^agent-0$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^↑ 还有/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: /^agent-0$/ })).toBeDefined()
+  expect(await ui.find({ text: /^↑ 还有/ })).toBeUndefined()
   expect(w.windowStarts.agents).toBe(0)
   await ui.unmount()
 })
@@ -762,7 +760,7 @@ test('15 个在跑的单个任务分窗口，maxRows=10 缩为六项，flow 切�
   await ui.unmount()
 })
 
-test('20 个阶段窗口可上下移动，agent 栏阶段为只读窗口，返回仍看得到所选阶段', async ($, on) => {
+test('20 个阶段窗口可上下移动，agent 栏里阶段仍可选、可翻页，返回仍看得到所选阶段', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
   w.dirs = ['r-1']
@@ -782,8 +780,9 @@ test('20 个阶段窗口可上下移动，agent 栏阶段为只读窗口，返�
   expect(await ui.find({ text: ' phase-4 · 1 个 agent ' })).toBeDefined()
   expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(10)
   await ui.press({ key: 'p:phase-4' })
-  expect(await ui.find({ type: 'Button', text: /还有/ })).toBeUndefined()
-  expect((await ui.find({ type: 'Text', text: /^↑ 还有/ }))?.props.dimColor).toBe(true)
+  expect(w.focuses.at(-1)).toBe('t:r-1:agent-4')
+  expect(await ui.find({ type: 'Button', key: 'p:phase-4' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'more:phases:up' })).toBeDefined()
   await ui.press({ key: 'back' })
   expect(await ui.find({ key: 'p:phase-4' })).toBeDefined()
   await ui.unmount()
@@ -988,7 +987,7 @@ test('flow 和单个 agent 同时在列表里时 flow 固定在上，同类里�
   await ui.unmount()
 })
 
-test('面板给 11 行时画彩色外框，10 行时省掉；放得下的 agent 全部显示，不出现「还有 N 个」', async ($, on) => {
+test('外框的上边写标题、下边放页脚，不另占行：草稿变长只剩 3 行时外框和停止键仍在，2 行时省掉；放得下的 agent 全部显示', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
   // 只有一个 flow：打开即进入阶段栏，右栏列出「审查」的四个 agent
@@ -999,14 +998,21 @@ test('面板给 11 行时画彩色外框，10 行时省掉；放得下的 agent 
   await clock.advance(2_000)
   const props = (maxRows: number) => ({ ...(PROPS as object), maxRows }) as never
   const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: props(11) })
-  const shells = async () => (await ui.findAll({ type: 'Box' })).filter(b => b.props.borderStyle === 'round' && b.props.borderColor === '#BB9AF7')
-  expect(await shells()).toHaveLength(1)
+  const corners = async () => (await ui.findAll({ type: 'Text', text: /^╭─ $/ })).filter(t => t.props.color === '#BB9AF7')
+  expect(await corners()).toHaveLength(1)
   for (const label of ['安全', '性能', '可读性', '兼容']) expect(await ui.find({ text: new RegExp(`^${label}$`) })).toBeDefined()
   expect(await ui.find({ text: /还有/ })).toBeUndefined()
   expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(11)
-  await ui.redraw(props(10))
-  expect(await shells()).toHaveLength(0)
-  expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(10)
+  for (const rows of [6, 4, 3]) {
+    await ui.redraw(props(rows))
+    expect(await corners()).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: /^review-api$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'stop' })).toBeDefined()
+    expect(drawnRows(await ui.drawn())).toBe(rows)
+  }
+  await ui.redraw(props(2))
+  expect(await corners()).toHaveLength(0)
+  expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(2)
   await ui.unmount()
 })
 
@@ -1051,9 +1057,9 @@ test('运行中的阶段用蓝色星形、agent 用蓝色细点阵；选中的�
   const first = await spinners()
   expect(first.every(([, color]) => color === '#7AA2F7')).toBe(true)
   expect((await ui.find({ type: 'Text', text: /^2$/ }))?.props.color).toBeUndefined()
-  // 标题行：状态靠左；总 token、总时长靠右，分开对齐下方的栏位
+  // 标题在外框上边：状态靠左，总 token 和总时长靠右
   expect(await ui.find({ type: 'Text', text: '  运行中' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '15.3k tok' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ 15\.3k tok · \d+m\d{2}s $/ })).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /^1$/ }))?.props.color).toBe('#7AA2F7')
   // 标题行的总时长是暗色；左栏运行中阶段的耗时是蓝色
   expect((await ui.findAll({ type: 'Text', text: /^\d+m\d{2}s$/ })).some(t => t.props.color === '#7AA2F7')).toBe(true)
@@ -1063,7 +1069,8 @@ test('运行中的阶段用蓝色星形、agent 用蓝色细点阵；选中的�
   expect(second.map(([c]) => c)).not.toEqual(first.map(([c]) => c))
   // 选中待开始的阶段：右栏换成它，但它不变蓝，运行中的阶段仍是蓝色标记
   await ui.press({ key: 'p:复核' })
-  expect(await ui.find({ text: ' 复核 · 1 个 agent ' })).toBeDefined()
+  // 进入后光标在第一个 agent 上，右栏标题写它的任务说明
+  expect(await ui.find({ text: ' 汇总复核：汇总 ' })).toBeDefined()
   expect((await ui.findAll({ type: 'Text', text: /^复核$/ })).every(t => t.props.color !== '#7AA2F7')).toBe(true)
   expect((await spinners()).length).toBeGreaterThan(0)
   // 全部结束：不再有运行标记，帧数不再变化
@@ -1076,7 +1083,7 @@ test('运行中的阶段用蓝色星形、agent 用蓝色细点阵；选中的�
   await ui.unmount()
 })
 
-test('时长从秒长到小时、token 从千长到百万时 flow 面板宽度不变；高度不够画方框时不留左右竖线', async ($, on) => {
+test('时长从秒长到小时、token 从千长到百万时 flow 面板宽度不变；高度不够画内框时不留内框的左右竖线', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
   w.dirs = w.dirs.filter(d => d !== 's-1')
@@ -1094,10 +1101,13 @@ test('时长从秒长到小时、token 从千长到百万时 flow 面板宽度�
   expect(await ui.find({ text: /^1h\d{2}m$/ })).toBeDefined()
   expect(await width()).toBe(before)
   expect(await ui.find({ type: 'Text', text: /^│ $/ })).toBeDefined()
-  // 只给 5 行：标题、两行内容、页脚，不画方框，也不画只剩左右竖线的残框
+  // 只给 5 行：外框上下边是标题和页脚，中间三行放不下内框，内框的暗色竖线一根不留；外框（紫色）仍在
   await ui.redraw({ ...(PROPS as object), maxRows: 5 } as never)
-  expect(await ui.find({ type: 'Text', text: /^│ $/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^ │$/ })).toBeUndefined()
+  const bars = async (pattern: RegExp) => await ui.findAll({ type: 'Text', text: pattern })
+  expect((await bars(/^│ $/)).filter(t => t.props.dimColor)).toHaveLength(0)
+  expect((await bars(/^ │$/)).filter(t => t.props.dimColor)).toHaveLength(0)
+  expect((await bars(/^│ $/)).every(t => t.props.color === '#BB9AF7')).toBe(true)
+  expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(5)
   expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
   await ui.unmount()
 })
@@ -1126,10 +1136,108 @@ test('按依赖提前开跑时几个阶段同时在跑：都画蓝色星形，�
   // 默认右栏是第一个运行中的阶段
   expect(await ui.find({ text: ' 审查 · 2 个 agent ' })).toBeDefined()
   expect((await ui.findAll({ type: 'Text', text: DOTS })).length).toBe(1)
-  // 切到复核，看到它正在跑的 agent
+  // 进入复核，看到它正在跑的 agent，右栏标题写光标所在 agent 的任务说明
   await ui.press({ key: 'p:复核' })
-  expect(await ui.find({ text: ' 复核 · 1 个 agent ' })).toBeDefined()
+  expect(await ui.find({ text: ' 汇总复核：汇总 ' })).toBeDefined()
   expect((await ui.findAll({ type: 'Text', text: DOTS })).length).toBe(1)
   expect(await ui.find({ text: /汇总复核/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('agent 详情显示过程和累计数；运行中的 flow 任务有插话框，Enter 写进控制目录并换新框；验收中、已完成和单个 agent 没有插话框', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  const recent = [
+    { id: 'c1', kind: 'cmd', text: 'rg --files', status: 'done' },
+    { kind: 'edit', text: 'src/a.ts' },
+    { id: 'c2', kind: 'cmd', text: 'npm test', status: 'running' },
+    { kind: 'steer', text: '先看 a.ts' },
+    { kind: 'note', text: '插话没有送达：turn 已结束' },
+  ]
+  const state = { ...flowState, tasks: flowState.tasks.map(t => (t.label === '性能' ? { ...t, recent, activity: { commands: 7, edits: 2, messages: 3 } } : t)) }
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(state)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  await ui.press({ key: 'r:r-1' })
+  await ui.press({ key: 't:r-1:性能' })
+  // 进详情后光标移到详情左栏的同一个 agent（另一套键，等新树画出来再落）；返回时回到 agent 栏的它
+  expect(w.focuses.at(-1)).toBe('a:r-1:性能')
+  await ui.press({ key: 'back' })
+  expect(w.focuses.at(-1)).toBe('t:r-1:性能')
+  await ui.press({ key: 't:r-1:性能' })
+  expect(await ui.find({ text: '过程  命令 7 · 改文件 2 次 · 消息 3' })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: '$ npm test' }))?.props.color).toBe('#7AA2F7')
+  expect((await ui.find({ type: 'Text', text: '↪ 插话：先看 a.ts' }))?.props.color).toBe('#7DCFFF')
+  expect((await ui.find({ type: 'Text', text: '! 插话没有送达：turn 已结束' }))?.props.color).toBe('#E0AF68')
+  expect(await ui.find({ type: 'Input', key: 'steer:r-1:性能:0' })).toBeDefined()
+  // Enter 发送：去掉首尾空白写进控制目录，换一个空的新框；只有空白时不发
+  await ui.input({ key: 'steer:r-1:性能:0', text: '  也看看缓存  ' })
+  const sent = controlWrites(w).at(-1)!
+  expect(sent).toMatch(/^\/home\/me\/\.claude\/codex-flow\/runs\/r-1\/control\/性能\.steer\.\d+\.txt$/)
+  expect(w.files[sent]).toBe('也看看缓存')
+  expect(w.toasts.at(-1)).toContain('送达后出现在「过程」里')
+  expect(await ui.find({ type: 'Input', key: 'steer:r-1:性能:1' })).toBeDefined()
+  await ui.input({ key: 'steer:r-1:性能:1', text: '   ' })
+  expect(controlWrites(w).at(-1)).toBe(sent)
+  // 已完成的 agent 没有插话框
+  await ui.press({ key: 'a:r-1:安全' })
+  expect(await ui.find({ type: 'Input' })).toBeUndefined()
+  // 验收中：写明在跑验收命令，插话框收起
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...state, tasks: state.tasks.map(t => (t.label === '性能' ? { ...t, checking: true } : t)) })
+  await clock.advance(2_000)
+  await ui.press({ key: 'a:r-1:性能' })
+  expect(await ui.find({ text: '验收中：Codex 已结束，正在跑验收命令。' })).toBeDefined()
+  expect(await ui.find({ text: /验收中$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Input' })).toBeUndefined()
+  // 单个 agent 由 run.sh 跑，收不到插话
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'r:s-1' })
+  expect(await ui.find({ text: '单个任务' })).toBeDefined()
+  expect(await ui.find({ type: 'Input' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('光标按树序走时两处改道：agent 栏第一项按 ↑ 回到当前阶段，插话框按 ↑ 回到当前 agent；落到停止键时仍停选中的 agent', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  // 审查的两个 agent 都在跑，详情里两个都有插话框
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, tasks: flowState.tasks.map(t => (t.label === '安全' ? { ...t, status: 'running', endedAt: undefined, result: undefined, reused: false } : t)) })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const requestId = 'ring'
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', requestId, props: PROPS })
+  const focus = (element: string) => $.ui.focus({ component: 'AbovePrompt', requestId, plugin: 'codex-flow', element, origin: { kind: 'person' } })
+  // 阶段栏 ↓ 到右栏第一个 agent：进入 agent 栏，栏标题写它的任务说明
+  await focus('t:r-1:安全')
+  expect(await ui.find({ text: ' 安全：查安全问题 ' })).toBeDefined()
+  // 再按 ↑，树序上是阶段栏最下面的「复核」，改落到当前阶段「审查」，右栏不换
+  await focus('p:复核')
+  expect(await ui.find({ text: ' 审查 · 2 个 agent ' })).toBeDefined()
+  // 在阶段栏里 ↓ 照常换阶段
+  await focus('p:复核')
+  expect(await ui.find({ text: ' 复核 · 1 个 agent ' })).toBeDefined()
+  // agent 栏里光标移到停止键：x 停的仍是「性能」
+  await focus('p:审查')
+  await focus('t:r-1:性能')
+  await focus('stop')
+  expect((await ui.find({ type: 'Button', key: 'stop' }))?.props.label).toBe('停止')
+  await ui.press({ key: 'stop' })
+  expect(controlWrites(w).at(-1)).toBe(`${ROOT}/r-1/control/性能.stop`)
+  // 详情：在当前 agent 上按 Enter 跳到插话框
+  await ui.press({ key: 't:r-1:安全' })
+  expect(await ui.find({ text: ' 安全 · 1/2 ' })).toBeDefined()
+  await ui.press({ key: 'a:r-1:安全' })
+  expect(w.focuses.at(-1)).toBe('steer:r-1:安全:0')
+  // 插话框按 ↑，树序上是左栏最后一个 agent「性能」，改回当前 agent，详情不换
+  await focus('steer:r-1:安全:0')
+  await focus('a:r-1:性能')
+  expect(await ui.find({ text: ' 安全 · 1/2 ' })).toBeDefined()
+  // 从 agent 本身 ↓ 照常切换
+  await focus('a:r-1:性能')
+  expect(await ui.find({ text: ' 性能 · 2/2 ' })).toBeDefined()
   await ui.unmount()
 })

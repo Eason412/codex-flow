@@ -1,7 +1,9 @@
 // codex-flow：输入框上方的面板看本会话派出的 Codex 任务、停任务；任务跑满阈值（默认 15 分钟）时在对话里提醒主 Agent 排查。
 // 只读执行器写的 state.json，不负责跑任务：mod 重载或没加载时，任务照常跑完。
 // 有新任务开始时面板自动出现，全部结束 30 秒后自动收起；全部结束后可用 q 关闭，同一批任务不再弹出。/flow 只打开。面板显示时状态行让出 codex 那一行。
-// 只有一个 flow 时照 Workflow 详情面板画带边框的两栏（左栏阶段，右栏 agent：模型、effort、token、耗时）；
+// 外框的上边写标题、下边放页脚，三行起就画，输入框草稿变长时也不丢。
+// 只有一个 flow 时照 Workflow 详情面板画两栏（左栏阶段，右栏 agent：模型、effort、token、耗时），两栏随时都能选；
+// agent 详情显示任务说明、最近几步过程和结果，运行中的 flow 任务下面有插话框，Enter 发给这个 Codex。
 // 其余情况（单个 agent、多个任务）一行一个，flow 标紫色、agent 标蓝色，Enter 进入，b 逐层退回。
 // 这块区域 mod 拿不到键盘，要用户按 ctrl+x tab 或点一下才能用键盘操作；只看进度不用碰键盘，内容每 2 秒刷新。
 import { atom, read, update } from 'claude-code'
@@ -48,6 +50,7 @@ const shown = atom({ plugin: 'codex-flow', key: 'shown' } as const, false)
 const opened = atom({ plugin: 'codex-flow', key: 'opened' } as const, [] as string[])
 const auto = atom({ plugin: 'codex-flow', key: 'auto' } as const, false)
 const frame = atom({ plugin: 'codex-flow', key: 'frame' } as const, 0)
+const steerRound = atom({ plugin: 'codex-flow', key: 'steerRound' } as const, 0)
 const EMPTY_WINDOWS: WindowStarts = { runs: 0, phases: 0, agents: 0, detailAgents: 0 }
 const windows = atom({ plugin: 'codex-flow', key: 'windows' } as const, EMPTY_WINDOWS)
 // 焦点事件沿用当前绘制的容量；各列起点保存在 $.state。
@@ -62,6 +65,8 @@ const reportedErrors = new Map<string, Set<string>>()
 let inflight: Promise<void> | null = null
 // 输入框上方那块区域的 id，渲染时记下，移动光标要用
 let bandId: string | null = null
+// 光标实际所在的元素（含按钮和插话框）；focused 只记阶段、agent、运行这几种条目
+let ringAt: string | null = null
 // 进程丢了的运行没有结束时间，按第一次发现的时刻算
 const lostSince = new Map<string, number>()
 // 模块实例独有：同名副本的 $.state 地址相同，但来源目录、重载代次和读取快照可区分。
@@ -79,6 +84,8 @@ const shortModel = (model: string) => String(model || '').replace(/^gpt-/, '')
 const runKey = (runId: string) => `r:${runId}`
 const phaseKey = (title: string) => `p:${title}`
 const taskKey = (runId: string, label: string) => `t:${runId}:${label}`
+// 详情左栏的 agent 另用一套键：和 agent 栏同键时，切换层级后光标可能停在旧树的位置上
+const detailKey = (runId: string, label: string) => `a:${runId}:${label}`
 
 function formatDuration(seconds: number) {
   if (seconds < 60) return `${seconds}s`
@@ -152,6 +159,15 @@ function toRun(dir: string, state: any, now: number, alive: Set<number>): FlowRu
         log: t.log ?? null,
         reused: t.reused === true,
         tokens: typeof t.tokens === 'number' ? t.tokens : null,
+        recent: Array.isArray(t.recent)
+          ? t.recent.filter((s: any) => s && typeof s.kind === 'string' && typeof s.text === 'string')
+              .map((s: any) => ({ kind: s.kind, text: s.text, ...(typeof s.status === 'string' ? { status: s.status } : {}) }))
+          : [],
+        activity: t.activity && typeof t.activity === 'object'
+          ? { commands: Number(t.activity.commands) || 0, edits: Number(t.activity.edits) || 0, messages: Number(t.activity.messages) || 0 }
+          : null,
+        // 执行器在验收中被杀时 checking 会留下；只在任务仍运行时算数
+        checking: t.checking === true && t.status === 'running' && status !== 'lost',
       }),
     ),
   }
@@ -584,14 +600,20 @@ function up(list: FlowRun[], at: Nav): { to: Nav; key: string | null } | null {
   return null
 }
 
+const isItem = (key: string) => /^[rpta]:/.test(key)
+
 async function focusOn($: Engine, key: string | null) {
   if (!key) return
-  await update($, focused, () => key)
-  await revealFocus($, key)
+  if (isItem(key)) {
+    await update($, focused, () => key)
+    await revealFocus($, key)
+  }
   try {
     if (bandId) {
       const result = await $.ui.focus({ requestId: bandId, key })
       if (result.deny) $.ui.log(JSON.stringify({ event: 'focus-denied', key, reason: result.deny }), { to: 'debug' })
+      // 插件自己移的光标不一定再经过本插件的 ui.focus 钩子，这里补记实际位置，改道判断要用
+      else ringAt = key
     }
   } catch (error) {
     $.ui.log(JSON.stringify({ event: 'focus-error', key, error: String(error) }), { to: 'debug' })
@@ -616,10 +638,12 @@ function columnKeys(list: FlowRun[], at: Nav, column: WindowColumn): string[] {
   const run = list.find(r => r.runId === at.runId)
   if (column === 'runs') return !run || !at.level ? currentRuns(list).map(r => runKey(r.runId)) : []
   if (!run || run.kind !== 'flow') return []
-  if (column === 'phases') return at.level === 'phases' ? run.phases.map(p => phaseKey(p.title)) : []
-  if ((column === 'agents' && at.level === 'agents') || (column === 'detailAgents' && at.level === 'agent')) {
-    return tasksOf(run, at.phase ?? defaultPhase(run)).map(t => taskKey(run.runId, t.label))
-  }
+  // 阶段栏和 agent 栏两栏随时可选；详情时左栏换成这个阶段的 agent
+  const columnsShown = at.level === 'phases' || at.level === 'agents'
+  if (column === 'phases') return columnsShown ? run.phases.map(p => phaseKey(p.title)) : []
+  const shownAgents = tasksOf(run, at.phase ?? defaultPhase(run))
+  if (column === 'agents' && columnsShown) return shownAgents.map(t => taskKey(run.runId, t.label))
+  if (column === 'detailAgents' && at.level === 'agent') return shownAgents.map(t => detailKey(run.runId, t.label))
   return []
 }
 
@@ -660,14 +684,17 @@ async function revealFocus($: Engine, key: string) {
   }
 }
 
+// 光标落到阶段就切到阶段栏并换右栏，落到 agent 就是 agent 栏；落到按钮、插话框时不动，x 停的仍是上一个条目
 async function trackFocus($: Engine, key: string) {
+  if (!isItem(key)) return
   const at = await read($, nav)
-  if (key.startsWith('p:') && at.level === 'phases') await moveTo($, { ...at, phase: key.slice(2) })
+  if (key.startsWith('p:') && (at.level === 'phases' || at.level === 'agents')) await moveTo($, { ...at, level: 'phases' as const, phase: key.slice(2) })
+  else if (key.startsWith('t:') && at.level === 'phases') await update($, nav, n => ({ ...n, level: 'agents' as const }))
   await update($, focused, () => key)
   await revealFocus($, key)
-  if (key.startsWith('t:') && at.level === 'agent') {
+  if (key.startsWith('a:') && at.level === 'agent') {
     const run = (await read($, runs)).find(r => r.runId === at.runId)
-    const task = run?.tasks.find(t => taskKey(run.runId, t.label) === key)
+    const task = run?.tasks.find(t => detailKey(run.runId, t.label) === key)
     if (run && task && task.label !== at.label) await showAgent($, run, task)
   }
 }
@@ -677,7 +704,7 @@ async function shiftWindow($: Engine, column: WindowColumn, direction: 'up' | 'd
   const keys = columnKeys(await read($, runs), at, column)
   if (!keys.length) return
   const hot = await read($, focused)
-  const preferred = keys.includes(hot ?? '') ? hot : column === 'phases' && at.phase ? phaseKey(at.phase) : column === 'detailAgents' && at.label ? taskKey(at.runId ?? '', at.label) : null
+  const preferred = keys.includes(hot ?? '') ? hot : column === 'phases' && at.phase ? phaseKey(at.phase) : column === 'detailAgents' && at.label ? detailKey(at.runId ?? '', at.label) : null
   // resize 后 state 可能还是上次尺寸的起点，先按当前绘制窗口校正再移动一格。
   const old = windowStart((await read($, windows))[column], keys.length, windowSize, keys.indexOf(preferred ?? ''))
   const start = windowStart(old + (direction === 'up' ? -1 : 1), keys.length, windowSize)
@@ -698,10 +725,67 @@ async function goBack($: Engine) {
 
 // 打开某个 agent 的详情，结果文本读出来放进 nav
 async function showAgent($: Engine, run: FlowRun, task: FlowTask) {
-  await update($, focused, () => taskKey(run.runId, task.label))
+  await update($, focused, () => detailKey(run.runId, task.label))
   await update($, nav, n => ({ ...n, level: 'agent' as const, label: task.label, text: null }))
   const text = await loadResult($, run, task)
   await update($, nav, n => (n.runId === run.runId && n.label === task.label ? { ...n, text } : n))
+}
+
+// x：阶段栏停整个 flow，agent 栏和详情停选中的 agent，列表里停选中的运行
+async function pressStop($: Engine) {
+  const all = await read($, runs)
+  const now = await read($, nav)
+  const target = all.find(r => r.runId === now.runId)
+  if (now.level === 'phases' && target) return stopRun($, target)
+  const key = now.level === 'agent' && now.label ? taskKey(now.runId ?? '', now.label) : await read($, focused)
+  const hitRun = all.find(r => key === runKey(r.runId))
+  if (hitRun) return stopRun($, hitRun)
+  for (const r of all) for (const t of r.tasks) if (taskKey(r.runId, t.label) === key) return stopTask($, r, t)
+  $.ui.toast('先选中一项再按 x')
+}
+
+async function pressHide($: Engine) {
+  // 渲染后可能刚开始新任务，旧按钮也不能关闭运行中的面板。
+  if ((await read($, runs)).some(r => r.status === 'running')) return
+  await setShown($, false, 'user-hide')
+}
+
+// 插话只给运行中、不在验收的 flow 任务：单个 agent 由 run.sh 跑，收不到插话；验收时 Codex 已经结束
+const canSteer = (run: FlowRun, task: FlowTask | undefined) => run.kind === 'flow' && task?.status === 'running' && !task.checking
+const steerKey = (runId: string, label: string, round: number) => `steer:${runId}:${label}:${round}`
+
+// 写进控制目录，执行器每秒取走、用 turn/steer 发给这个 Codex；送达或被拒都会出现在详情的「过程」里
+async function sendSteer($: Engine, runId: string, label: string, value: string) {
+  const text = value.trim()
+  if (!text) return
+  const run = (await read($, runs)).find(r => r.runId === runId)
+  const task = run?.tasks.find(t => t.label === label)
+  if (!run || !task || !canSteer(run, task)) {
+    $.ui.toast(`「${label}」已不在运行，插话没有发出`)
+    return
+  }
+  await $.fs.write(`${run.dir}/control/${fileSafe(label)}.steer.${await $.clock.now()}.txt`, text)
+  await update($, steerRound, n => n + 1)
+  $.ui.toast('已交给执行器，送达后出现在「过程」里')
+  await focusOn($, steerKey(runId, label, await read($, steerRound)))
+}
+
+// 光标按树序走：从 agent 栏第一项按 ↑ 会落到阶段栏最下面一项，从插话框按 ↑ 会落到左栏最后一个 agent。
+// 这两种改落到当前阶段、当前 agent。点击同时触发 onPress，点到的阶段或 agent 仍会照常打开。
+async function redirectFocus($: Engine, key: string) {
+  const at = await read($, nav)
+  const run = (await read($, runs)).find(r => r.runId === at.runId)
+  if (!run || !at.phase) return null
+  if (at.level === 'agents') {
+    const first = tasksOf(run, at.phase)[0]
+    const left = key.startsWith('p:') || key.startsWith('more:phases:')
+    if (first && ringAt === taskKey(run.runId, first.label) && left && key !== phaseKey(at.phase)) return phaseKey(at.phase)
+  }
+  if (at.level === 'agent' && at.label && ringAt?.startsWith('steer:')) {
+    const mine = detailKey(run.runId, at.label)
+    if ((key.startsWith('a:') || key.startsWith('more:detailAgents:')) && key !== mine) return mine
+  }
+  return null
 }
 
 export const register: Register = on => {
@@ -744,9 +828,12 @@ export const register: Register = on => {
 
   // 光标移动时：阶段栏里右栏跟着换阶段，详情页里右栏跟着换 agent；记下位置，x 停的就是它
   on('ui.focus', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const moved = await next(e)
-    const key = e.element
+    const redirect = e.element && e.origin.kind === 'person' ? await redirectFocus($, e.element) : null
+    const target = redirect ? { ...e, element: redirect } : e
+    const moved = await next(target)
+    const key = target.element
     if (moved.deny || !key) return moved
+    ringAt = key
     const more = /^more:(runs|phases|agents|detailAgents):(up|down)$/.exec(key)
     if (more) {
       await shiftWindow($, more[1] as WindowColumn, more[2] as 'up' | 'down')
@@ -761,41 +848,35 @@ export const register: Register = on => {
     // 没打开、有问卷要用这块区域，或者用户正在看某个子代理的对话时让出来（回到主对话再画）
     if (!(await read($, shown)) || e.props.hasSurvey || e.props.view?.agentId) return next(e)
     bandId = e.requestId
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    // 手机端没有输入框，那里不画插话框
+    const Input = 'Input' in elements ? elements.Input : null
     const list = await read($, runs)
     const at = await read($, nav)
     const hot = await read($, focused)
     const tick = await read($, frame)
+    const round = await read($, steerRound)
     const spinner = SPIN[tick % SPIN.length]
     const agentSpinner = AGENT_SPIN[tick % AGENT_SPIN.length]
     const canHide = !list.some(r => r.status === 'running')
-    // 整块最宽 100 列，右边留 4 列给引擎的折叠按钮 [-]；高度够时外面加一圈彩色框，和上面的对话分开
+    // 整块最宽 100 列，右边留 4 列给引擎的折叠按钮 [-]
     const bandColumns = Math.min(100, Math.max(40, (e.props.bodyColumns || 104) - 4))
     const bandRows = Math.max(0, Math.floor(e.props.maxRows ?? 20))
     if (!bandRows) return <Box flexDirection="column" />
-    // 外框占两行；加框后 flow 每栏分窗口时仍要能看到三项（需 11 行），不够就省掉外框
-    const shelled = bandRows >= 11
+    // 外框的上边写标题、下边放页脚，不另占行：输入框草稿变长、这块区域变矮时外框仍在。
+    // 三行起画外框；只剩两行时一行标题一行内容，一行时只有内容
+    const shelled = bandRows >= 3
+    const showTitle = bandRows >= 2
     const columns = bandColumns - (shelled ? 4 : 0)
-    const rows = bandRows - (shelled ? 2 : 0)
-    // 外框颜色跟类型走：flow 紫色，单个 agent 蓝色，两种都有时青色
-    const shell = (color: string, width: number, node: RenderElement) => shelled
-      ? <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} alignSelf="flex-start" width={width + 4}>{node}</Box>
-      : node
-    const buttonCells = (label: string) => 3 + cells(label)
-    const footerCells = (hints: string[], stop: string | null, canBack: boolean) => {
-      const parts = [stop && buttonCells(stop), canBack && buttonCells('返回'), canHide && buttonCells('关闭')].filter(Boolean) as number[]
-      const text = hints.length ? cells(hints.join(' · ')) + (parts.length ? 3 : 0) : 0
-      return text + parts.reduce((sum, n) => sum + n, 0) + Math.max(0, parts.length - 1) * 3
-    }
+    const rows = bandRows - (shelled ? 2 : Number(showTitle))
     const run = list.find(r => r.runId === at.runId)
-    // 至少留一行内容；高度不足时依次省去方框、页脚、标题。页脚有返回、停止按钮，优先于方框保留。
-    // flow 两栏视图只在内容（最多三行）放得下时画方框；不画方框时左右竖线一起省，不留只剩竖线的残框。
-    const needRows = run && at.level ? (at.level === 'agent' ? 12 : Math.min(12, Math.max(run.phases.length, tasksOf(run, at.phase ?? defaultPhase(run)).length))) : 0
-    const showTitle = rows >= 2
-    const showFooter = rows >= 3
-    const framed = !!(run && at.level) && rows >= 2 + Number(showTitle) + Number(showFooter) + Math.min(needRows, 3)
-    const fixedRows = Number(showTitle) + Number(showFooter) + (framed ? 2 : 0)
-    const bodyRows = rows - fixedRows
+    // flow 两栏的内框（栏标题和底线）占两行，放得下最多三行内容才画；高度不够时先省内框，外框保留
+    const needRows = run?.kind === 'flow' && at.level
+      ? (at.level === 'agent' ? 12 : Math.min(12, Math.max(run.phases.length, tasksOf(run, at.phase ?? defaultPhase(run)).length)))
+      : 0
+    const framed = needRows > 0 && rows >= 2 + Math.min(needRows, 3)
+    const bodyRows = Math.max(1, rows - (framed ? 2 : 0))
     windowSize = Math.min(12, Math.max(1, bodyRows - 2))
     const size = windowSize
     const starts = await read($, windows)
@@ -832,50 +913,100 @@ export const register: Register = on => {
         </Text>
       )
     }
-    const footer = (hints: string[], stop: string | null, canBack: boolean) => showFooter ? (
-      <Box>
-        {hints.length > 0 && <Box flexShrink={1}><Text dimColor wrap="truncate-end">{hints.join(' · ')}{stop || canBack || canHide ? ' · ' : ''}</Text></Box>}
-        {stop && (
-            <Button
-              plain
-              hotkey="x"
-              key="stop"
-              label={stop}
-              onPress={async () => {
-                const all = await read($, runs)
-                const now = await read($, nav)
-                const target = all.find(r => r.runId === now.runId)
-                if (now.level === 'phases' && target) return stopRun($, target)
-                const key = now.level === 'agent' && now.label ? taskKey(now.runId ?? '', now.label) : await read($, focused)
-                const hitRun = all.find(r => key === runKey(r.runId))
-                if (hitRun) return stopRun($, hitRun)
-                for (const r of all) for (const t of r.tasks) if (taskKey(r.runId, t.label) === key) return stopTask($, r, t)
-                $.ui.toast('先选中一项再按 x')
-              }}
-            />
-        )}
-        {stop && (canBack || canHide) && <Text dimColor> · </Text>}
-        {canBack && <Button plain hotkey="b" key="back" label="返回" onPress={() => goBack($)} />}
-        {canBack && canHide && <Text dimColor> · </Text>}
-        {canHide && (
-          <Button plain hotkey="q" key="hide" label="关闭" onPress={async () => {
-            // 渲染后可能刚开始新任务，旧按钮也不能关闭运行中的面板。
-            if ((await read($, runs)).some(r => r.status === 'running')) return
-            await setShown($, false, 'user-hide')
-          }} />
-        )}
-      </Box>
-    ) : <Box />
+
+    type Head = { name: string; color: string; sub: string; right?: string }
+    type Foot = { hints: string[]; stop: string | null; canBack: boolean }
+    // 带快捷键的无边框按钮画成「x: 停止」，比文字多三格
+    const buttonCells = (label: string) => 3 + cells(label)
+    const buttonsOf = (foot: Foot) => [foot.stop, foot.canBack ? '返回' : null, canHide ? '关闭' : null].filter((b): b is string => !!b)
+    const buttonsWidth = (foot: Foot) => {
+      const buttons = buttonsOf(foot)
+      return buttons.reduce((sum, b) => sum + buttonCells(b), 0) + Math.max(0, buttons.length - 1) * 3
+    }
+    const footerCells = (foot: Foot) => {
+      const buttons = buttonsOf(foot)
+      return (foot.hints.length ? cells(foot.hints.join(' · ')) + (buttons.length ? 3 : 0) : 0) + buttonsWidth(foot)
+    }
+    // 页脚：提示文字在前（放不下就截短或省掉），停止、返回、关闭按钮在后
+    const footer = (foot: Foot, width: number) => {
+      const buttons = buttonNodes(foot)
+      let sep = buttons.length && foot.hints.length ? ' · ' : ''
+      const room = width - buttonsWidth(foot) - cells(sep)
+      let hint = foot.hints.join(' · ')
+      if (cells(hint) > room) hint = room >= 6 ? fit(hint, room) : ''
+      if (!hint) sep = ''
+      const nodes: RenderElement[] = []
+      if (hint) nodes.push(<Text dimColor>{hint}{sep}</Text>)
+      buttons.forEach((node, i) => {
+        if (i) nodes.push(<Text dimColor> · </Text>)
+        nodes.push(node)
+      })
+      return { width: cells(hint) + cells(sep) + buttonsWidth(foot), nodes }
+    }
+    function buttonNodes(foot: Foot) {
+      const nodes: RenderElement[] = []
+      if (foot.stop) nodes.push(<Button plain hotkey="x" key="stop" label={foot.stop} onPress={() => pressStop($)} />)
+      if (foot.canBack) nodes.push(<Button plain hotkey="b" key="back" label="返回" onPress={() => goBack($)} />)
+      if (canHide) nodes.push(<Button plain hotkey="q" key="hide" label="关闭" onPress={() => pressHide($)} />)
+      return nodes
+    }
+    // 外框：╭─ 名称  状态 ──── token · 时长 ─╮ … ╰─ 提示 · 按钮 ────╯，总宽 width + 4。
+    // body 必须正好 height 行，两侧竖线按行数画成两列。
+    const shell = (color: string, width: number, head: Head, body: RenderElement, height: number, foot: Foot) => {
+      if (!shelled) {
+        return (
+          <Box flexDirection="column" width={width}>
+            {showTitle && <Box width={width}>
+              <Text bold color={head.color} wrap="truncate-end">{head.name}</Text>
+              <Text dimColor wrap="truncate-end">  {[head.sub, head.right].filter(Boolean).join(' · ')}</Text>
+            </Box>}
+            {body}
+          </Box>
+        )
+      }
+      const name = fit(head.name, Math.max(4, width - 4))
+      let right = head.right ? ` ${head.right} ` : ''
+      if (width - 3 - cells(name) - cells(right) < 0) right = ''
+      const subRoom = width - 3 - cells(name) - cells(right)
+      const sub = head.sub && subRoom >= 6 ? `  ${fit(head.sub, subRoom - 2)}` : ''
+      const topDash = Math.max(1, width - 2 - cells(name) - cells(sub) - cells(right))
+      const bottom = footer(foot, width - 2)
+      const side = (text: string) => <Box flexDirection="column">{Array.from({ length: height }, () => <Text color={color}>{text}</Text>)}</Box>
+      return (
+        <Box flexDirection="column" width={width + 4}>
+          <Box>
+            <Text color={color}>╭─ </Text>
+            <Text bold color={head.color}>{name}</Text>
+            {sub ? <Text dimColor>{sub}</Text> : null}
+            <Text color={color}> {'─'.repeat(topDash)}</Text>
+            {right ? <Text dimColor>{right}</Text> : null}
+            <Text color={color}>─╮</Text>
+          </Box>
+          <Box>
+            {side('│ ')}
+            <Box flexDirection="column" width={width}>{body}</Box>
+            {side(' │')}
+          </Box>
+          {bottom.width
+            ? <Box>
+                <Text color={color}>╰─ </Text>
+                {bottom.nodes}
+                <Text color={color}> {'─'.repeat(Math.max(0, width - 2 - bottom.width))}─╯</Text>
+              </Box>
+            : <Text color={color}>╰{'─'.repeat(width + 2)}╯</Text>}
+        </Box>
+      )
+    }
 
     // 最外层：单个 agent、多个任务时一行一个，类型标在名称前（flow 紫色、agent 蓝色）
     if (!run || !at.level) {
       const cur = currentRuns(list)
-      if (!cur.length) return shell(CYAN, Math.min(columns, Math.max(cells('本会话还没有派出 Codex 任务。'), footerCells([], null, false))), (
-        <Box flexDirection="column">
-          <Text dimColor>本会话还没有派出 Codex 任务。</Text>
-          {footer([], null, false)}
-        </Box>
-      ))
+      if (!cur.length) {
+        const message = '本会话还没有派出 Codex 任务。'
+        const foot: Foot = { hints: [], stop: null, canBack: false }
+        const width = Math.min(columns, Math.max(cells(message), footerCells(foot) + 2, 12))
+        return shell(CYAN, width, { name: 'Codex', color: CYAN, sub: '' }, <Text dimColor>{message}</Text>, 1, foot)
+      }
       const win = windowed(cur, 'runs', r => runKey(r.runId), hot)
       const nameWidth = Math.min(24, Math.max(8, ...cur.map(r => cells(r.name) + 2)))
       const flows = cur.filter(r => r.kind === 'flow').length
@@ -891,72 +1022,75 @@ export const register: Register = on => {
         if (tokens) parts.push(`${formatTokens(tokens)} tok`)
         return parts.join(' · ')
       }
-      const listHints = ['ctrl+x tab 操作', '↑/↓ 选择', 'Enter 查看']
+      const foot: Foot = { hints: ['ctrl+x tab 操作', '↑/↓ 选择', 'Enter 查看'], stop: null, canBack: false }
       // token 会增长：已有 token 的按 999.9k 预留，运行中还没有 token 的预留「 · 999.9k tok」
       const grow = (r: FlowRun) => { const n = tokensOf(r.tasks); return n ? 6 - formatTokens(n).length : r.status === 'running' ? cells(' · 999.9k tok') : 0 }
       const statsWidth = Math.max(4, Math.min(columns - 17 - nameWidth, Math.max(...cur.map(r => cells(statsOfRun(r)) + grow(r))) + 1))
-      const listWidth = Math.min(columns, Math.max(17 + nameWidth + statsWidth, cells(`Codex  ${summary}`), footerCells(listHints, null, false)))
+      const listWidth = Math.min(columns, Math.max(17 + nameWidth + statsWidth, cells(`Codex  ${summary}`) + 3, footerCells(foot) + 2))
       const listColor = flows && singles ? CYAN : flows ? PURPLE : BLUE
-      return shell(listColor, listWidth, (
-        <Box flexDirection="column" width={listWidth}>
-          {showTitle && <Box>
-            <Text bold color={CYAN}>
-              Codex
-            </Text>
-            <Text dimColor wrap="truncate-end">  {summary}</Text>
-          </Box>}
-          <Box flexDirection="column">
-            {withMore(win.items.map(r => {
-              const key = runKey(r.runId)
-              const [kind, color] = KIND[r.kind]
-              return (
-                <Box>
-                  <Text color={BLUE}>{hot === key ? '❯ ' : '  '}</Text>
-                  {mark(r.status, r.kind === 'flow' ? spinner : agentSpinner)}
-                  <Text> </Text>
-                  <Box width={6}>
-                    <Text color={color}>{kind}</Text>
-                  </Box>
-                  <Box width={nameWidth}>
-                    <Button
-                      plain
-                      key={key}
-                      label={fit(r.name, nameWidth - 1)}
-                      onPress={async () => {
-                        const phase = defaultPhase(r)
-                        const first = tasksOf(r, phase)[0]
-                        // 单个 agent 直接看详情
-                        if (r.kind === 'single' && first) {
-                          await moveTo($, { runId: r.runId, level: 'agent' as const, phase, label: first.label, text: null })
-                          return showAgent($, r, first)
-                        }
-                        await moveTo($, { runId: r.runId, level: 'phases' as const, phase, label: null, text: null })
-                        await focusOn($, phase ? phaseKey(phase) : null)
-                      }}
-                    />
-                  </Box>
-                  <Box width={statsWidth}>
-                    <Text dimColor wrap="truncate-end">
-                      {fit(statsOfRun(r), statsWidth - 1)}
-                    </Text>
-                  </Box>
-                  <Box width={7} justifyContent="flex-end">
-                    <Text dimColor>{formatDuration(r.seconds)}</Text>
-                  </Box>
-                </Box>
-              )
-            }), 'runs', win, true)}
+      const lines = withMore(win.items.map(r => {
+        const key = runKey(r.runId)
+        const [kind, color] = KIND[r.kind]
+        return (
+          <Box>
+            <Text color={BLUE}>{hot === key ? '❯ ' : '  '}</Text>
+            {mark(r.status, r.kind === 'flow' ? spinner : agentSpinner)}
+            <Text> </Text>
+            <Box width={6}>
+              <Text color={color}>{kind}</Text>
+            </Box>
+            <Box width={nameWidth}>
+              <Button
+                plain
+                key={key}
+                label={fit(r.name, nameWidth - 1)}
+                onPress={async () => {
+                  const phase = defaultPhase(r)
+                  const first = tasksOf(r, phase)[0]
+                  // 单个 agent 直接看详情
+                  if (r.kind === 'single' && first) {
+                    await moveTo($, { runId: r.runId, level: 'agent' as const, phase, label: first.label, text: null })
+                    return showAgent($, r, first)
+                  }
+                  await moveTo($, { runId: r.runId, level: 'phases' as const, phase, label: null, text: null })
+                  await focusOn($, phase ? phaseKey(phase) : null)
+                }}
+              />
+            </Box>
+            <Box width={statsWidth}>
+              <Text dimColor wrap="truncate-end">
+                {fit(statsOfRun(r), statsWidth - 1)}
+              </Text>
+            </Box>
+            <Box width={7} justifyContent="flex-end">
+              <Text dimColor>{formatDuration(r.seconds)}</Text>
+            </Box>
           </Box>
-          {footer(listHints, null, false)}
-        </Box>
-      ))
+        )
+      }), 'runs', win, true)
+      return shell(listColor, listWidth, { name: 'Codex', color: CYAN, sub: summary }, <Box flexDirection="column">{lines}</Box>, lines.length, foot)
     }
 
     type Line = { text: string; color?: string; dim?: boolean; bold?: boolean }
-    // agent 详情：任务说明，然后是结果或错误，按宽度折行
+    // 过程里每一步的标记：命令、改文件、消息、搜索、插话、执行器的说明
+    const STEP: Record<string, [string, string | undefined]> = {
+      cmd: ['$', undefined], edit: ['✎', undefined], msg: ['›', undefined], search: ['⌕', undefined], steer: ['↪', CYAN], note: ['!', YELLOW],
+    }
+    // agent 详情：任务说明；过程（累计数和最近几步，运行中多列几步）；然后是结果或错误，按宽度折行
     const card = (t: FlowTask, width: number) => {
       const lines: Line[] = []
+      const live = t.status === 'running'
       if (t.brief) for (const l of wrap(t.brief, width)) lines.push({ text: l })
+      if (t.activity || t.recent.length) {
+        lines.push({ text: '' })
+        const a = t.activity
+        lines.push({ text: `过程${a ? `  命令 ${a.commands} · 改文件 ${a.edits} 次 · 消息 ${a.messages}` : ''}`, bold: true, dim: true })
+        for (const step of t.recent.slice(live ? -8 : -3)) {
+          const [icon, color] = STEP[step.kind] ?? ['·', undefined]
+          const tone = step.status === 'running' ? BLUE : step.status === 'failed' ? RED : color
+          lines.push({ text: `${icon} ${step.kind === 'steer' ? '插话：' : ''}${step.text}`, color: tone, dim: !tone })
+        }
+      }
       lines.push({ text: '' })
       if (at.text) {
         lines.push({ text: '结果', bold: true, dim: true })
@@ -965,59 +1099,32 @@ export const register: Register = on => {
         lines.push({ text: '错误', bold: true, dim: true })
         for (const l of wrap(t.error, width)) lines.push({ text: l, color: RED })
       } else {
-        lines.push({ text: t.status === 'running' ? '运行中，结果出来后显示在这里。' : '没有结果。', dim: true })
+        lines.push({ text: !live ? '没有结果。' : t.checking ? '验收中：Codex 已结束，正在跑验收命令。' : '运行中，结果出来后显示在这里。', dim: true })
       }
       return lines
     }
     // 超出高度的截掉，末行写还剩多少
-    const clip = (lines: Line[]) => {
-      const room = bodyRows
+    const clip = (lines: Line[], room = bodyRows) => {
+      if (room <= 0) return []
       return lines.length > room ? [...lines.slice(0, room - 1), { text: `… 还有 ${lines.length - room + 1} 行`, dim: true }] : lines
     }
+    // 空行画一个空格：空 Text 不占行，两侧竖线会和内容错开
     const draw = (l: Line) => (
       <Text color={l.color} dimColor={l.dim} bold={l.bold} wrap="truncate-end">
-        {l.text}
+        {l.text || ' '}
       </Text>
     )
 
-    // 单个 agent 的详情：一栏卡片；名称蓝色，标题行写模型、effort、token、状态、耗时
+    // 单个 agent 的详情：一栏，名称蓝色，标题写模型、effort、token、状态、耗时；外框已有标题，不再套内框
     if (run.kind === 'single') {
       const single = run.tasks[0]
-      const width = columns - 4
-      const lines = clip(single ? card(single, width) : [{ text: '没有记录。', dim: true }])
-      const title = ' 详情 '
-      const inner = Math.min(width, Math.max(24, cells(title) + 2, ...lines.map(l => cells(l.text))))
-      const singleStop = run.status === 'running' ? '停止' : null
-      const singleWidth = Math.min(columns, Math.max(inner + 4, cells(`${run.name}  ${runSubtext(run)}`), footerCells(['ctrl+x tab 操作'], singleStop, true)))
-      return shell(BLUE, singleWidth, (
-        <Box flexDirection="column" width={singleWidth}>
-          {showTitle && <Box>
-            <Text bold color={BLUE}>
-              {run.name}
-            </Text>
-            <Text dimColor wrap="truncate-end">  {runSubtext(run)}</Text>
-          </Box>}
-          <Box flexDirection="column">
-            {framed && <Box>
-              <Text dimColor>╭─</Text>
-              <Text>{title}</Text>
-              <Text dimColor>{'─'.repeat(Math.max(0, inner + 1 - cells(title)))}╮</Text>
-            </Box>}
-            {lines.map(l => (
-              <Box>
-                <Text dimColor>│ </Text>
-                <Box width={inner}>{draw(l)}</Box>
-                <Text dimColor> │</Text>
-              </Box>
-            ))}
-            {framed && <Text dimColor>╰{'─'.repeat(inner + 2)}╯</Text>}
-          </Box>
-          {footer(['ctrl+x tab 操作'], singleStop, true)}
-        </Box>
-      ))
+      const lines = clip(single ? card(single, columns) : [{ text: '没有记录。', dim: true }])
+      const foot: Foot = { hints: ['ctrl+x tab 操作'], stop: run.status === 'running' ? '停止' : null, canBack: true }
+      const width = Math.min(columns, Math.max(24, ...lines.map(l => cells(l.text)), cells(`${run.name}  ${runSubtext(run)}`) + 3, footerCells(foot) + 2))
+      return shell(BLUE, width, { name: run.name, color: BLUE, sub: runSubtext(run) }, <Box flexDirection="column">{lines.map(draw)}</Box>, lines.length, foot)
     }
 
-    // 一个 flow：带边框的两栏，左栏阶段，右栏 agent 或 agent 详情，照 Workflow 详情面板的样子；名称紫色
+    // 一个 flow：两栏，左栏阶段，右栏 agent 或 agent 详情，照 Workflow 详情面板的样子；名称紫色
     const phase = at.phase ?? defaultPhase(run)
     const agents = tasksOf(run, phase)
     const level = at.level
@@ -1039,7 +1146,7 @@ export const register: Register = on => {
     const titleWidth = Math.max(...run.phases.map(p => cells(`${p.title} · ${tasksOf(run, p.title).length} 个 agent`) + 3))
     const listWidth = Math.max(titleWidth, 4 + labelWidth + 1 + modelWidth + TOKEN_SLOT + TIME_SLOT)
     let rightWidth = Math.min(available, listWidth)
-    // 模型栏吃掉多余宽度，token 和时长栏始终贴右，和标题行的总数对齐
+    // 模型栏吃掉多余宽度，token 和时长栏始终贴右
     const modelCell = Math.max(1, rightWidth - 5 - labelWidth - TOKEN_SLOT - TIME_SLOT)
 
     const border = (left: string, right: string, top: boolean) => {
@@ -1067,22 +1174,39 @@ export const register: Register = on => {
       )
     }
 
-    // 左栏：阶段栏时是阶段（可选），agent 详情时是这个阶段的 agent（可选），agent 栏时阶段只作标示
+    // 左栏：阶段栏和 agent 栏时是阶段，随时可选；agent 详情时是这个阶段的 agent
     const leftColumn = level === 'agent' ? 'detailAgents' : 'phases'
     const leftWin = level === 'agent'
-      ? windowed(agents, 'detailAgents', t => taskKey(run.runId, t.label), hot && agents.some(t => taskKey(run.runId, t.label) === hot) ? hot : at.label ? taskKey(run.runId, at.label) : null)
-      : windowed(run.phases, 'phases', p => phaseKey(p.title), level === 'phases' && hot && run.phases.some(p => phaseKey(p.title) === hot) ? hot : phase ? phaseKey(phase) : null)
+      ? windowed(agents, 'detailAgents', t => detailKey(run.runId, t.label), hot && agents.some(t => detailKey(run.runId, t.label) === hot) ? hot : at.label ? detailKey(run.runId, at.label) : null)
+      : windowed(run.phases, 'phases', p => phaseKey(p.title), hot && run.phases.some(p => phaseKey(p.title) === hot) ? hot : phase ? phaseKey(phase) : null)
+    const steer = !!Input && !!task && canSteer(run, task)
     const leftCells = withMore(
       level === 'agent'
         ? (leftWin.items as FlowTask[]).map(t => {
-            const key = taskKey(run.runId, t.label)
+            const key = detailKey(run.runId, t.label)
             const me = t.label === at.label
             return (
               <Box>
                 <Text color={BLUE}>{me ? '❯ ' : '  '}</Text>
                 {mark(t.status)}
                 <Text> </Text>
-                <Button plain key={key} label={fit(t.label, leftWidth - 4)} dimColor={me ? undefined : true} onPress={() => showAgent($, run, t)} />
+                <Button
+                  plain
+                  key={key}
+                  label={fit(t.label, leftWidth - 4)}
+                  dimColor={me ? undefined : true}
+                  onPress={async () => {
+                    // 在当前 agent 上按 Enter 跳到插话框；点别的 agent 切过去
+                    if (t.label === (await read($, nav)).label) {
+                      const now = (await read($, runs)).find(r => r.runId === run.runId)
+                      const cur = now?.tasks.find(x => x.label === t.label)
+                      if (now && cur && canSteer(now, cur)) await focusOn($, steerKey(run.runId, t.label, await read($, steerRound)))
+                      return
+                    }
+                    await showAgent($, run, t)
+                    await focusOn($, key)
+                  }}
+                />
               </Box>
             )
           })
@@ -1100,7 +1224,7 @@ export const register: Register = on => {
             const dim = !live && !me
             return (
               <Box>
-                <Text color={BLUE}>{level === 'phases' && hot === phaseKey(p.title) ? '❯ ' : '  '}</Text>
+                <Text color={BLUE}>{hot === phaseKey(p.title) ? '❯ ' : '  '}</Text>
                 <Text color={tone} dimColor={dim}>
                   {String(leftWin.start + i + 1).padStart(numWidth)}
                 </Text>
@@ -1110,71 +1234,79 @@ export const register: Register = on => {
                 </Text>
                 <Text> </Text>
                 <Box width={titleWidth}>
-                  {level === 'phases' ? (
-                    <Button
-                      plain
-                      key={phaseKey(p.title)}
-                      label={fit(p.title, titleWidth - 1)}
-                      dimColor={dim ? true : undefined}
-                      onPress={async () => {
-                        const first = ts[0]
-                        await moveTo($, { ...await read($, nav), level: 'agents' as const, phase: p.title })
-                        if (first) await focusOn($, taskKey(run.runId, first.label))
-                      }}
-                    />
-                  ) : (
-                    <Text color={tone} dimColor={dim}>
-                      {fit(p.title, titleWidth - 1)}
-                    </Text>
-                  )}
+                  <Button
+                    plain
+                    key={phaseKey(p.title)}
+                    label={fit(p.title, titleWidth - 1)}
+                    dimColor={dim ? true : undefined}
+                    onPress={async () => {
+                      const first = ts[0]
+                      await moveTo($, { ...await read($, nav), level: 'agents' as const, phase: p.title, label: null, text: null })
+                      if (first) await focusOn($, taskKey(run.runId, first.label))
+                    }}
+                  />
                 </Box>
                 <Box width={countWidth} justifyContent="flex-end">
                   <Text color={tone} dimColor={dim}>
                     {count}
                   </Text>
                 </Box>
-                {timeCell > 0 && (
-                  <Box width={timeCell} justifyContent="flex-end">
-                    <Text color={tone} dimColor={dim}>
-                      {time}
-                    </Text>
-                  </Box>
-                )}
+                <Box width={timeCell} justifyContent="flex-end">
+                  <Text color={tone} dimColor={dim}>
+                    {time}
+                  </Text>
+                </Box>
               </Box>
             )
-          }), leftColumn, leftWin, level !== 'agents')
+          }), leftColumn, leftWin, true)
 
-    // 右栏：agent 栏和阶段栏时列出这个阶段的 agent（只有 agent 栏可选），详情时是这个 agent 的卡片
+    // 右栏：阶段栏和 agent 栏时列出所选阶段的 agent（可选，Enter 看详情），详情时是这个 agent 的卡片和插话框
     let rightCells: RenderElement[]
     let rightTitle: string
     if (task) {
       rightTitle = `${task.label} · ${agents.indexOf(task) + 1}/${agents.length}`
-      const stats = [agentStats(task), task.reused ? '复用上次结果' : agentTime(task), !task.reused && (task.status === 'running' || task.status === 'completed') ? WORD[task.status] : ''].filter(Boolean).join(' · ')
+      const time = task.reused ? '复用上次结果' : agentTime(task)
+      const state = task.checking ? '验收中' : !task.reused && (task.status === 'running' || task.status === 'completed') ? WORD[task.status] : ''
+      const stats = [agentStats(task), time, state].filter(Boolean).join(' · ')
       const lines: Line[] = [{ text: stats, dim: true }, ...card(task, available)]
-      // 详情按可用宽度折行，再收到最长一行的宽度
-      rightWidth = Math.min(available, Math.max(listWidth, cells(rightTitle) + 3, ...lines.map(l => cells(l.text))))
-      rightCells = clip(lines).map(draw)
+      // 详情按可用宽度折行，再收到最长一行的宽度；有插话框时至少留出能输入的宽度
+      rightWidth = Math.min(available, Math.max(listWidth, cells(rightTitle) + 3, ...lines.map(l => cells(l.text)), steer ? 40 : 0))
+      rightCells = clip(lines, bodyRows - (steer ? 1 : 0)).map(draw)
+      if (steer && Input) {
+        rightCells.push(
+          <Box width={rightWidth}>
+            <Input
+              key={steerKey(run.runId, task.label, round)}
+              label="插话"
+              placeholder="补充指示，发给这个 agent"
+              submitLabel="发送"
+              onSubmit={(value: string) => void sendSteer($, run.runId, task.label, value)}
+            />
+          </Box>,
+        )
+      }
     } else {
-      rightTitle = `${phase ?? ''} · ${agents.length} 个 agent`
+      // agent 栏里光标在某个 agent 上时，栏标题写它的任务说明
+      const hotAgent = agents.find(t => taskKey(run.runId, t.label) === hot)
+      rightTitle = level === 'agents' && hotAgent?.brief ? `${hotAgent.label}：${hotAgent.brief}` : `${phase ?? ''} · ${agents.length} 个 agent`
       const runningAgent = agents.find(t => t.status === 'running')
-      const preferred = level === 'agents' ? hot : runningAgent ? taskKey(run.runId, runningAgent.label) : null
+      const preferred = hotAgent ? hot : runningAgent ? taskKey(run.runId, runningAgent.label) : null
       const rightWin = windowed(agents, 'agents', t => taskKey(run.runId, t.label), preferred)
       rightCells = withMore(rightWin.items.map(t => {
         const key = taskKey(run.runId, t.label)
         const tokens = t.tokens ? `${formatTokens(t.tokens)} tok` : ''
-        // 耗时栏：运行中和完成写时长，复用写「复用」，其余写状态（等待、失败等）
-        const time = agentTime(t) || (WORD[t.status] ?? t.status)
+        // 耗时栏：运行中和完成写时长，复用写「复用」，验收中写「验收中」，其余写状态（等待、失败等）
+        const time = t.checking ? '验收中' : agentTime(t) || (WORD[t.status] ?? t.status)
         return (
           <Box>
-            <Text color={BLUE}>{level === 'agents' && hot === key ? '❯ ' : '  '}</Text>
+            <Text color={BLUE}>{hot === key ? '❯ ' : '  '}</Text>
             {mark(t.status)}
             <Text> </Text>
             <Box width={labelWidth + 1}>
-              {level === 'agents' ? (
-                <Button plain key={key} label={fit(t.label, labelWidth)} dimColor={t.status === 'running' ? undefined : true} onPress={() => showAgent($, run, t)} />
-              ) : (
-                <Text dimColor={t.status !== 'running'}>{fit(t.label, labelWidth)}</Text>
-              )}
+              <Button plain key={key} label={fit(t.label, labelWidth)} dimColor={t.status === 'running' ? undefined : true} onPress={async () => {
+                await showAgent($, run, t)
+                await focusOn($, detailKey(run.runId, t.label))
+              }} />
             </Box>
             <Box width={modelCell}>
               <Text dimColor>{fit(`${shortModel(t.model)} ${t.effort}`, modelCell)}</Text>
@@ -1187,56 +1319,46 @@ export const register: Register = on => {
             </Box>
           </Box>
         )
-      }), 'agents', rightWin, level === 'agents')
+      }), 'agents', rightWin, true)
       if (!agents.length) rightCells = [<Text dimColor>这个阶段没有 agent</Text>]
     }
 
+    // 两栏各是一列：光标按树序先走完左栏再到右栏，不会在两栏之间来回跳
     const height = Math.max(leftCells.length, rightCells.length)
-    const body = Array.from({ length: height }, (_, i) => (
-      <Box>
-        {framed && <Text dimColor>│ </Text>}
-        <Box width={leftWidth}>{leftCells[i] ?? <Text> </Text>}</Box>
-        <Text dimColor> │ </Text>
-        <Box width={rightWidth}>{rightCells[i] ?? <Text> </Text>}</Box>
-        {framed && <Text dimColor> │</Text>}
+    const fill = (items: RenderElement[]) => [...items, ...Array.from({ length: height - items.length }, () => <Text> </Text>)]
+    const bar = (text: string) => <Box flexDirection="column">{Array.from({ length: height }, () => <Text dimColor>{text}</Text>)}</Box>
+    const body = (
+      <Box flexDirection="column">
+        {framed && border(level === 'agent' ? `${phase ?? ''}` : '阶段', rightTitle, true)}
+        <Box>
+          {framed && bar('│ ')}
+          <Box flexDirection="column" width={leftWidth}>{fill(leftCells)}</Box>
+          {bar(' │ ')}
+          <Box flexDirection="column" width={rightWidth}>{fill(rightCells)}</Box>
+          {framed && bar(' │')}
+        </Box>
+        {framed && border('', '', false)}
       </Box>
-    ))
+    )
     const running = run.status === 'running'
     const outer = !up(list, at)
     const hints =
-      level === 'phases' ? ['↑/↓ 选择阶段', 'Enter 进入'] : level === 'agents' ? ['↑/↓ 选择', 'Enter 详情'] : ['↑/↓ 切换 agent']
+      level === 'phases' ? ['↑/↓ 选择', 'Enter 看 agent'] : level === 'agents' ? ['↑/↓ 选择', 'Enter 详情'] : steer ? ['↑/↓ 切换 agent', 'Enter 插话'] : ['↑/↓ 切换 agent']
     // 停止键只给在跑的目标：阶段栏停整个 flow，agent 栏和详情停选中的 agent
     const target = level === 'agent' ? task : agents.find(t => taskKey(run.runId, t.label) === hot)
-    const stop = !running ? null : level === 'phases' ? (run.kind === 'flow' ? '停止整个 flow' : '停止') : target?.status === 'running' ? '停止' : null
-    const flowHints = ['ctrl+x tab 操作', ...hints]
-    // 标题行：名称和状态靠左，总 token 和总时长靠右，分别对齐下方 agent 的 token 栏和时长栏
-    const boxWidth = leftWidth + rightWidth + (framed ? 7 : 3)
+    const stop = !running ? null : level === 'phases' ? '停止整个 flow' : target?.status === 'running' ? '停止' : null
+    const foot: Foot = { hints: ['ctrl+x tab 操作', ...hints], stop, canBack: !outer }
     const totalTokens = tokensOf(run.tasks)
     const parallel = run.status === 'running' ? run.phases.filter(p => p.status === 'running').length : 0
-    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, cells(`${run.name}  ${WORD.running} · 9 个阶段并行 · 999.9k tok · 99h59m`), footerCells(flowHints, stop, !outer)))
-    return shell(PURPLE, flowWidth, (
-      <Box flexDirection="column" width={flowWidth}>
-        {showTitle && <Box>
-          <Box width={Math.max(1, boxWidth - TOKEN_SLOT - TIME_SLOT - (framed ? 2 : 0))}>
-            <Text bold color={PURPLE} wrap="truncate-end">
-              {run.name}
-            </Text>
-            <Text dimColor wrap="truncate-end">  {WORD[run.status] ?? run.status}{parallel > 1 ? ` · ${parallel} 个阶段并行` : ''}</Text>
-          </Box>
-          <Box width={TOKEN_SLOT} justifyContent="flex-end">
-            <Text dimColor>{totalTokens ? `${formatTokens(totalTokens)} tok` : ''}</Text>
-          </Box>
-          <Box width={TIME_SLOT} justifyContent="flex-end">
-            <Text dimColor>{formatDuration(run.seconds)}</Text>
-          </Box>
-        </Box>}
-        <Box flexDirection="column">
-          {framed && border(level === 'agent' ? `${phase ?? ''}` : '阶段', rightTitle, true)}
-          {body}
-          {framed && border('', '', false)}
-        </Box>
-        {footer(flowHints, stop, !outer)}
-      </Box>
-    ))
+    const head: Head = {
+      name: run.name,
+      color: PURPLE,
+      sub: `${WORD[run.status] ?? run.status}${parallel > 1 ? ` · ${parallel} 个阶段并行` : ''}`,
+      right: [totalTokens ? `${formatTokens(totalTokens)} tok` : '', formatDuration(run.seconds)].filter(Boolean).join(' · '),
+    }
+    // 标题按最长的状态和数字预留（9 个阶段并行、999.9k tok、99h59m），数字增长时方框不跳
+    const headCells = cells(run.name) + cells(`  ${WORD.running} · 9 个阶段并行`) + cells(' 999.9k tok · 99h59m ') + 3
+    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, headCells, footerCells(foot) + 2))
+    return shell(PURPLE, flowWidth, head, body, height + (framed ? 2 : 0), foot)
   })
 }
