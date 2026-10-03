@@ -1374,12 +1374,14 @@ export const register: Register = on => {
     // 只剩一行内容时（输入框草稿或任务清单占了高度），两栏只放得下一个阶段和一个 agent，看起来像只有一个任务。
     // 改画一行摘要：当前阶段的进度和它的全部 agent，放不下的写「+N」；没有标题行时 flow 名称放在最前
     if (rows <= 1) {
+      // 一行摘要用满可用宽度，名称、模型和 token 才放得下
+      const lineWidth = columns
       const p = run.phases.find(x => x.title === phase)
       const nodes: RenderElement[] = []
       let used = 0
       const put = (node: RenderElement, w: number) => { nodes.push(node); used += w }
       if (!showTitle) {
-        const name = fit(run.name, Math.max(4, Math.floor(flowWidth / 3)))
+        const name = fit(run.name, Math.max(4, Math.floor(lineWidth / 3)))
         put(<Text bold color={PURPLE}>{name}</Text>, cells(name))
         put(<Text>  </Text>, 2)
       }
@@ -1389,23 +1391,35 @@ export const register: Register = on => {
         put(<Text color={p.status === 'running' ? BLUE : undefined}>{text}</Text>, cells(text))
         put(<Text dimColor> │ </Text>, 3)
       }
+      // 行尾：这个阶段的 agent 用同一个模型和 effort 时写一次，不同时写在各自名称后；
+      // 没有标题行时再写总 token 和总时长。放不下时依次省掉时长、模型、token，agent 名称优先
+      const models = [...new Set(agents.map(t => `${shortModel(t.model)} ${t.effort}`))]
+      const shared = models.length === 1 ? models[0]! : ''
+      const total = tokensOf(run.tasks)
+      const tail = [shared, !showTitle && total ? `${formatTokens(total)} tok` : '', !showTitle ? formatDuration(run.seconds) : '']
+      const tailText = () => tail.filter(Boolean).map(s => ` · ${s}`).join('')
+      for (const drop of [2, 0, 1]) if (used + 12 + cells(tailText()) > lineWidth) tail[drop] = ''
+      const room = lineWidth - cells(tailText())
       for (let i = 0; i < agents.length; i++) {
         const t = agents[i]!
         const label = fit(t.label, 16)
-        const piece = (i ? 2 : 0) + 2 + cells(label)
+        const own = shared ? '' : ` ${shortModel(t.model)} ${t.effort}`
+        const piece = (i ? 2 : 0) + 2 + cells(label) + cells(own)
         const rest = agents.length - i
         const reserve = rest > 1 ? cells(` +${rest - 1}`) : 0
-        if (used + piece + reserve > flowWidth) {
+        if (used + piece + reserve > room) {
           put(<Text dimColor>{` +${rest}`}</Text>, cells(` +${rest}`))
           break
         }
         if (i) put(<Text>  </Text>, 2)
         put(mark(t.status), 1)
         put(<Text dimColor={t.status === 'running' ? undefined : true}>{` ${label}`}</Text>, 1 + cells(label))
+        if (own) put(<Text dimColor>{own}</Text>, cells(own))
       }
+      if (tailText()) put(<Text dimColor>{tailText()}</Text>, cells(tailText()))
       // 摘要里没有可选项：提示文字说明原因；停止键只留阶段栏的「停止整个 flow」，免得停掉看不见的 agent
       const compact: Foot = { hints: ['高度不够，只显示摘要'], stop: level === 'phases' ? stop : null, canBack: false }
-      return shell(PURPLE, flowWidth, head, <Box width={flowWidth}>{nodes}</Box>, 1, compact)
+      return shell(PURPLE, lineWidth, head, <Box width={lineWidth}>{nodes}</Box>, 1, compact)
     }
     return shell(PURPLE, flowWidth, head, body, height + (framed ? 2 : 0), foot)
   })

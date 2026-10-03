@@ -1038,6 +1038,8 @@ test('只剩一行内容时 flow 画一行摘要：当前阶段进度和全部 a
     // 详情页的停止键停的是看不见的 agent，摘要里不放
     expect(await ui.find({ type: 'Button', key: 'stop' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'review-api' })).toBeDefined()
+    // 同一模型写一次；没有标题行时行尾再写总 token 和总时长（有标题行时它们在标题里）
+    expect(await ui.find({ type: 'Text', text: rows === 1 ? /^ · 6\.1-sol high · 12\.4k tok · \d/ : /^ · 6\.1-sol high$/ })).toBeDefined()
   }
   await ui.redraw(props(14))
   expect(await ui.find({ type: 'Input' })).toBeDefined()
