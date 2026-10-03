@@ -7,6 +7,7 @@
 //   codex-flow.mjs cancel <runId> [任务名]              停整个 flow 或其中一个任务
 //   codex-flow.mjs steer <runId> <任务名> "<补充指示>"   给运行中的任务插话
 //   codex-flow.mjs watch <runId> [--alert-after 秒]     有任务跑满时长或 flow 结束时打印一行并退出
+//   codex-flow.mjs clean <runId>                        删掉这次运行的隔离任务留下的私有引用和 worktree
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,7 @@ import { die } from "./lib/runtime.mjs";
 import { runFlow, onStop } from "./lib/runner.mjs";
 import { cmdStatus, cmdCancel, cmdSteer, cmdWatch } from "./lib/commands.mjs";
 import { SINGLE_FLAGS, cmdCheck, cmdSingleStart, cmdSingleWatch, cmdSingleEnd } from "./lib/single.mjs";
+import { cmdClean } from "./lib/isolation.mjs";
 
 export { shortCommand, activityOf } from "./lib/activity.mjs";
 export { inScope } from "./lib/scope.mjs";
@@ -56,6 +58,7 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
     case "cancel": cmdCancel(parseArgs(rest)); break;
     case "steer": cmdSteer(parseArgs(rest)); break;
     case "watch": await cmdWatch(parseArgs(rest, ["alert-after"])); break;
+    case "clean": cmdClean(parseArgs(rest)); break;
     case "_check": cmdCheck(parseArgs(rest, ["model", "effort", "label"])); break;
     case "_single-watch": await cmdSingleWatch(parseArgs(rest, ["dir"])); break;
     case "_single-start": cmdSingleStart(parseArgs(rest, SINGLE_FLAGS)); break;

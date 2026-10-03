@@ -7,7 +7,8 @@ import { fileSafe, save, servers, touchedBy } from "./runtime.mjs";
 import { loadSchema } from "./plan.mjs";
 import { gitSnapshot, realPath, scopeReport } from "./scope.mjs";
 import { oneLine, TaskActivity } from "./activity.mjs";
-import { finishChecks } from "./checks.mjs";
+import { checkTask, finishChecks, settleChecks } from "./checks.mjs";
+import { closeWorktree, judgeResult, mergeBack, openWorktree } from "./isolation.mjs";
 
 const SCOPE_SETTLE_MS = 300; // 拍结束快照前等其他任务的改文件记录到齐
 
@@ -24,8 +25,8 @@ function prepareTask(dir, state, task, prompt, cwd) {
   fs.writeFileSync(path.join(dir, "logs", `${fileSafe(task.label)}.prompt.txt`), prompt);
   save();
 
-  // 写入范围：开始前记下 git 工作区状态，运行中收集 Codex 的改文件记录
-  const before = task.writes ? gitSnapshot(cwd) : null;
+  // 写入范围：开始前记下 git 工作区状态，运行中收集 Codex 的改文件记录；隔离任务改用 worktree 前后的快照核对
+  const before = task.writes && task.isolation !== "worktree" ? gitSnapshot(cwd) : null;
   const touched = new Set();
   touchedBy.set(task.label, touched);
   // 面板的过程区：最近几步和累计数，随 token 一起每秒存一次
@@ -175,6 +176,16 @@ function writeTaskResult(run) {
   task.result = path.relative(dir, resultFile);
 }
 
+// 隔离任务的 Codex 正常结束：存成果、核对范围，在 worktree 里验收，通过再合回；整个过程保持运行中，最终状态由验收或合回决定。
+// 合并结果不是验收过的内容时，在主工作区（原 cwd）再验收
+async function finishIsolated(run) {
+  const { dir, task, iso, stopFile } = run;
+  if (!judgeResult(task, iso)) return;
+  const failure = await checkTask(dir, task, iso.wtCwd, stopFile);
+  if (failure) settleChecks(task, failure);
+  else await mergeBack(dir, task, iso, () => finishChecks(dir, task, iso.cwd, stopFile));
+}
+
 async function finishTurn(run, end) {
   const { dir, state, task, cwd, stopFile, touched, before } = run;
   // Codex 已结束：面板据 turnEnded 收起插话框；被中断时没收到结束的命令记为失败
@@ -183,22 +194,27 @@ async function finishTurn(run, end) {
   dropSteers(run);
   save();
   // 并行任务刚写的文件，改文件记录可能还在管道里没处理；稍等再拍结束快照，免得被记成来源未定
-  if (task.writes) await new Promise((resolve) => setTimeout(resolve, SCOPE_SETTLE_MS));
+  if (task.writes && !run.iso) await new Promise((resolve) => setTimeout(resolve, SCOPE_SETTLE_MS));
 
   if (end.status === "completed") {
     writeTaskResult(run);
-    // 写入核对在验收之前，验收命令的产物不算 Codex 写的
-    if (task.writes) task.scope = scopeReport(state, task, cwd, touched, before, before ? gitSnapshot(cwd) : null);
-    await finishChecks(dir, task, cwd, stopFile);
+    if (run.iso) await finishIsolated(run);
+    else {
+      // 写入核对在验收之前，验收命令的产物不算 Codex 写的
+      if (task.writes) task.scope = scopeReport(state, task, cwd, touched, before, before ? gitSnapshot(cwd) : null);
+      await finishChecks(dir, task, cwd, stopFile);
+    }
   } else if (end.status === "interrupted") {
     task.status = "cancelled";
     task.error = task.stopRequested ? "已按要求停止" : "被中断";
   } else {
     task.status = "failed";
     task.error = end.error || `turn ${end.status}`;
+    task.failureKind = "execution";
   }
-  // 失败或被停掉的任务也可能已经写了文件
-  if (end.status !== "completed" && task.writes) task.scope = scopeReport(state, task, cwd, touched, before, before ? gitSnapshot(cwd) : null);
+  // 失败或被停掉的任务也可能已经写了文件；隔离任务的改动只在 worktree 里，收尾时存进引用
+  if (end.status !== "completed" && task.writes && !run.iso) task.scope = scopeReport(state, task, cwd, touched, before, before ? gitSnapshot(cwd) : null);
+  if (run.iso) closeWorktree(task, run.iso);
   // 面板刷新有几秒延迟，验收期间可能又写进来插话
   dropSteers(run);
   task.endedAt = nowIso();
@@ -208,12 +224,20 @@ async function finishTurn(run, end) {
 export async function runTask(dir, state, task, prompt, cwd) {
   const run = prepareTask(dir, state, task, prompt, cwd);
   try {
+    // 隔离任务在 worktree 里跑：Codex、改文件记录和验收都用 worktree 内对应的目录，state 里的 cwd 仍是原目录
+    if (task.isolation === "worktree") {
+      run.iso = openWorktree(dir, task, cwd);
+      run.cwd = run.iso.wtCwd;
+      save();
+    }
     await startTurn(run);
   } catch (error) {
     servers.delete(run.server);
     run.server?.close();
     task.status = "failed";
     task.error = `启动失败：${error.message}`;
+    task.failureKind = "execution";
+    if (run.iso) closeWorktree(task, run.iso);
     task.endedAt = nowIso();
     run.log({ method: "start-failed", error: error.message });
     dropSteers(run);

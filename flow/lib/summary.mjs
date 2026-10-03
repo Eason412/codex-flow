@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { effectiveStatus, elapsedSeconds, formatDuration } from "./state.mjs";
 import { here } from "./runtime.mjs";
+import { isolationLines } from "./isolation.mjs";
 
 // 阶段只在有任务正在跑时算运行中；部分完成、其余还在等前置任务的算等待
 export function phaseStatus(tasks) {
@@ -91,6 +92,7 @@ export function renderSummary(dir, state) {
     if (t.checkResults?.length && t.status === "completed") lines.push(`    验收 ${t.checkResults.length}/${t.checks?.length ?? t.checkResults.length} 通过`);
     if (t.scope?.outside?.length) lines.push(`    ⚠ 越界写入：${list(t.scope.outside)}`);
     if (t.scope?.unclaimed?.length) lines.push(`    ⚠ 范围外变动，来源未定${t.scope.duringChecks ? "（期间有其他任务在跑验收）" : ""}：${list(t.scope.unclaimed)}`);
+    for (const line of isolationLines(t)) lines.push(`    ${line}`);
     let conclusion = [];
     try {
       conclusion = conclusionOf(dir, t);

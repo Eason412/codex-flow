@@ -7,6 +7,7 @@ import { literal, loadPlan, renderPrompt, validatePlan, withContract } from "./p
 import { inScope, realPath } from "./scope.mjs";
 import { killGroup, recheckTask } from "./checks.mjs";
 import { runTask } from "./task.mjs";
+import { cleanRunArchives, interruptedMerge, isolationFields } from "./isolation.mjs";
 import { overallStatus, phaseStatus, renderSummary } from "./summary.mjs";
 
 export function onStop(signal) {
@@ -115,7 +116,12 @@ function populateFlowTasks(dir, state, previous, planTasks, deps) {
   const tierOf = (model) => (serviceTierOf(model) ? { serviceTier: serviceTierOf(model) } : {});
   for (const [label, t] of planTasks) {
     const old = previous?.tasks?.find((o) => o.label === label);
-    const contract = { writes: t.writes, checks: t.checks };
+    // 上次合回写主工作区时中断的隔离任务：不复用、不重跑，记为失败等人工核对
+    if (old?.merge?.state === "applying") {
+      state.tasks.push(interruptedMerge(old, t.phase));
+      continue;
+    }
+    const contract = { writes: t.writes, checks: t.checks, ...isolationFields(t) };
     state.tasks.push(canReuse(label)
       ? reuse(old, t)
       : { label, phase: t.phase, model: t.model, effort: t.effort, ...tierOf(t.model), brief: t.brief || briefOf(literal(t.prompt)), hash: promptHash(t), status: "pending",
@@ -177,7 +183,7 @@ export async function runFlow(planFile, resumeId) {
   fs.writeFileSync(path.join(dir, "summary.txt"), summary);
   process.stdout.write(summary);
   try {
-    pruneOldRuns();
+    pruneOldRuns(7, cleanRunArchives);
   } catch {
     // 清理失败不影响结果
   }
