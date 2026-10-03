@@ -13,7 +13,8 @@ if (args[0] === 'app-server') {
     let result = {};
     // 插话里带 REJECT 时像 turn 已结束那样回错误
     if (request.method === 'turn/steer' && JSON.stringify(request.params).includes('REJECT')) return send({ id: request.id, error: { code: -32600, message: '假插话被拒' } });
-    if (request.method === 'thread/start') result = { thread: { id: 'fake-flow-thread' }, model: 'gpt-6.1-sol' };
+    // 像 Codex 一样回报这个 thread 用的 service tier：请求了就是请求的值，没请求是 null
+    if (request.method === 'thread/start') result = { thread: { id: 'fake-flow-thread' }, model: 'gpt-6.1-sol', serviceTier: request.params?.serviceTier ?? null };
     if (request.method === 'turn/start') result = { turn: { id: 'fake-flow-turn' } };
     send({ id: request.id, result });
     if (request.method === 'turn/start') {
@@ -71,6 +72,9 @@ if (args[0] === 'app-server') {
   fs.mkdirSync(dir, { recursive: true });
   if (resumed) append(record(800, 200, 800, 200, '2020-01-01T00:00:00Z'));
   append({ timestamp: new Date().toISOString(), type: 'turn_context', payload: { model: 'gpt-6.1-sol', effort: 'high', cwd: process.cwd(), sandbox_policy: { type: 'danger-full-access' } } });
+  // 和真实 Codex 一样，只有续聊会把 thread 设置（含 service tier）写进会话记录
+  const tier = args.map((a) => /^service_tier="(.*)"$/.exec(a)?.[1]).find(Boolean) ?? 'default';
+  if (resumed) append({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model: 'gpt-6.1-sol', service_tier: tier } } });
   append({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'token_count', info: null } });
   append(record(baseInput + firstInput, baseOutput + firstOutput, firstInput, firstOutput));
   fs.writeFileSync(path.join(process.env.CODEX_HOME, 'fake-pid'), String(process.pid));

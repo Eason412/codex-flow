@@ -99,14 +99,15 @@ test('_single-end 的非 JSON 回复去首尾空白，输出格式不变', () =>
   assert.equal(readJson(statePath(dir)).tasks[0].tokens, 30);
 });
 
-test('实际使用 context 只接受开始到结束的时间窗（含边界）', () => {
+test('实际使用 context 和 service tier 只接受开始到结束的时间窗（含边界）', () => {
   const file = rollout();
   const context = (timestamp, model) => ({ timestamp, type: 'turn_context', payload: { model, effort: 'high' } });
-  fs.writeFileSync(file, [context(before, 'before'), context(start, 'start'), context(inside, 'inside'), context(end, 'end'), context(afterEnd, 'after')].map(line).join(''));
-  assert.deepEqual(singleContext('unit-thread', start, end), { found: true, context: { model: 'end', effort: 'high' } });
+  const settings = (timestamp, tier) => ({ timestamp, type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { service_tier: tier } } });
+  fs.writeFileSync(file, [context(before, 'before'), settings(before, 'before'), context(start, 'start'), settings(inside, 'priority'), context(inside, 'inside'), context(end, 'end'), context(afterEnd, 'after'), settings(afterEnd, 'after')].map(line).join(''));
+  assert.deepEqual(singleContext('unit-thread', start, end), { found: true, context: { model: 'end', effort: 'high' }, tier: 'priority' });
   fs.writeFileSync(file, line(context(before, 'before')) + line(context(afterEnd, 'after')));
-  assert.deepEqual(singleContext('unit-thread', start, end), { found: true, context: null });
-  assert.deepEqual(singleContext('missing', start, end), { found: false, context: null });
+  assert.deepEqual(singleContext('unit-thread', start, end), { found: true, context: null, tier: null });
+  assert.deepEqual(singleContext('missing', start, end), { found: false, context: null, tier: null });
 });
 
 function record(name, state, old = false) {
@@ -269,12 +270,20 @@ for (const scenario of ['cached', 'prior', 'missing', 'current-only', 'new']) te
 });
 
 test('模型名单从 skill 根目录读取，与当前工作目录无关', () => {
-  assert.deepEqual(readModelConfig(), { models: ['gpt-6.1-sol', 'gpt-6-astra'], efforts: ['low', 'medium', 'high', 'xhigh'] });
+  assert.deepEqual(readModelConfig(), { models: ['gpt-6.1-sol', 'gpt-6-astra'], efforts: ['low', 'medium', 'high', 'xhigh'], fast: ['gpt-6.1-sol'] });
   const result = command(['_check', '--model', 'gpt-6-astra', '--effort', 'xhigh'], { cwd: root });
   assert.equal(result.status, 0, result.stderr);
+  // _check 给 run.sh 输出要请求的 tier：默认用 Fast 的模型是 priority，其余为空
+  assert.equal(result.stdout, '');
+  assert.equal(command(['_check', '--model', 'gpt-6.1-sol', '--effort', 'high'], { cwd: root }).stdout, 'priority');
 });
 
-for (const value of [null, {}, { models: [], efforts: ['high'] }, { models: ['x', 'x'], efforts: ['high'] }, { models: ['x'], efforts: 'high' }, { models: ['x'], efforts: [1] }, { models: [' '], efforts: ['high'] }]) test(`模型名单格式拒绝：${JSON.stringify(value)}`, () => {
+test('模型名单的 fast 可省略，省略时没有模型默认用 Fast', () => {
+  const file = path.join(root, 'no-fast.json'); fs.writeFileSync(file, JSON.stringify({ models: ['x'], efforts: ['high'] }));
+  assert.deepEqual(readModelConfig(file).fast, []);
+});
+
+for (const value of [null, {}, { models: [], efforts: ['high'] }, { models: ['x', 'x'], efforts: ['high'] }, { models: ['x'], efforts: 'high' }, { models: ['x'], efforts: [1] }, { models: [' '], efforts: ['high'] }, { models: ['x'], efforts: ['high'], fast: ['y'] }, { models: ['x'], efforts: ['high'], fast: 'x' }, { models: ['x'], efforts: ['high'], fast: ['x', 'x'] }]) test(`模型名单格式拒绝：${JSON.stringify(value)}`, () => {
   const file = path.join(root, 'invalid.json'); fs.writeFileSync(file, JSON.stringify(value));
   assert.throws(() => readModelConfig(file), /模型名单格式错误/);
 });
@@ -343,6 +352,11 @@ for (const mode of ['new', 'resume', 'fork']) test(`假 codex 端到端 run.sh�
   assert.equal(final.tasks[0].tokens, lastLive.tasks[0].tokens);
   assert.equal(final.tasks[0].actualModel, 'gpt-6.1-sol');
   assert.equal(final.tasks[0].actualEffort, 'high');
+  // sol 默认用 Fast：只有续聊的会话记录写了 tier 能核实，新开和分叉只报告已请求
+  assert.equal(final.tasks[0].serviceTier, 'priority');
+  assert.equal(final.tasks[0].actualServiceTier, resumed ? 'priority' : null);
+  if (resumed) assert.match(result.stdout, /实际使用: model=gpt-6\.1-sol effort=high service_tier=priority /);
+  else assert.match(result.stdout, /Fast: 已请求 service_tier=priority；新开的 exec 会话记录不写 tier，无法核实/);
   assert.match(result.stdout, /"整数": 9007199254740993/);
   assert.match(result.stdout, /"浮点": 1\.0/);
   const status = command(['status'], { env });
@@ -388,6 +402,10 @@ test('多任务 flow 回归：假 app-server 的累计 token 口径、阶段结�
   const resumed = command(['run', '--resume', state.runId], { env, timeout: 5000 });
   assert.equal(resumed.status, 0, resumed.stdout + resumed.stderr);
   assert.ok(readJson(statePath(dir)).tasks.every((task) => task.reused));
+  // sol 默认用 Fast：开 thread 时请求 priority，记下 Codex 回报的 tier；astra 不请求
+  assert.deepEqual(state.tasks.map((task) => [task.serviceTier, task.actualServiceTier]), [['priority', 'priority'], [undefined, null]]);
+  assert.match(result.stdout, /一 +gpt-6\.1-sol high ⚡ /);
+  assert.doesNotMatch(result.stdout, /gpt-6-astra medium ⚡/);
 });
 
 const sol = { model: 'gpt-6.1-sol', effort: 'high' };
@@ -901,7 +919,7 @@ test('桌面分叉 _<子id>.jsonl 可供查找、watch、结算和实际 context
   const context = { model: 'gpt-6-astra', effort: 'medium' };
   fs.writeFileSync(file, line({ timestamp: inside, type: 'turn_context', payload: context }) + line(token(102000, 26845, 12000, 6965)));
   assert.equal(findRollout('unit-thread'), file);
-  assert.deepEqual(singleContext('unit-thread', start, end), { found: true, context });
+  assert.deepEqual(singleContext('unit-thread', start, end), { found: true, context, tier: null });
   singleWatchTick(dir, cache());
   const task = readJson(statePath(dir)).tasks[0];
   assert.equal(task.tokenBaseline, 109880);

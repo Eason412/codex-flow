@@ -43,7 +43,8 @@ if [[ -n $schema ]]; then
 fi
 
 flow="$here/flow/codex-flow.mjs"
-node "$flow" _check --model "$model" --effort "$effort" --label "${name:-任务}" || exit 2
+# 名单外的模型和 effort 在这里拦下；models.json 里默认用 Fast 的模型返回 priority
+tier=$(node "$flow" _check --model "$model" --effort "$effort" --label "${name:-任务}") || exit 2
 
 base="${CODEX_FLOW_HOME:-$HOME/.claude/codex-flow}/runs"
 mkdir -p "$base"
@@ -54,7 +55,7 @@ echo "[codex] 运行中，日志目录: $run"
 printf '%s' "$task" >"$run/task.txt"
 # 登记参数：_single-start 用；登记失败时 _single-end 用同一组参数补登
 abs_dir=$(cd "$dir" 2>/dev/null && pwd) || abs_dir=$dir
-reg=(--dir "$run" --model "$model" --effort "$effort" --label "$name" --pid $$ --cwd "$abs_dir" --thread-id "$resume" --forked-from "$fork" --task-file "$run/task.txt")
+reg=(--dir "$run" --model "$model" --effort "$effort" --service-tier "$tier" --label "$name" --pid $$ --cwd "$abs_dir" --thread-id "$resume" --forked-from "$fork" --task-file "$run/task.txt")
 # 模型已由上面的 _check 拦下；这里失败只影响面板显示，任务照常运行
 if ! node "$flow" _single-start "${reg[@]}" 2>/dev/null; then
   echo "[codex] ⚠ 没能登记到 Codex 任务面板，任务照常运行"
@@ -82,6 +83,7 @@ cd "$dir" || { echo "目录不存在: $dir" >&2; stop_watch; node "$flow" _singl
 opts=(-m "$model" -c "model_reasoning_effort=$effort"
       --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
       --json -o "$run/last.md")
+[[ -n $tier ]] && opts+=(-c "service_tier=\"$tier\"")
 [[ -n $schema ]] && opts+=(--output-schema "$schema")
 if [[ -n $resume ]]; then
   cmd=(codex exec resume "${opts[@]}" "$resume" "$task")

@@ -30,6 +30,8 @@ const RED = '#F7768E'
 const YELLOW = '#E0AF68'
 const BLUE = '#7AA2F7'
 const PURPLE = '#BB9AF7'
+// 用 Fast 的模型名前面标一个黄色闪电
+const FAST = '⚡'
 // 运行中的标记，只在有任务运行且面板显示时动：阶段和 flow 用闪烁的星形（与 Claude Code 自己的 ✻ 指示一致），
 // agent 用转圈的细点阵，两层一眼能分开。星形不用「·」这一帧，免得看起来像停了。
 const SPIN = ['✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳']
@@ -84,6 +86,8 @@ let latestPanel: Pick<PanelRecord, 'shown' | 'auto' | 'by'> = { shown: false, au
 
 const fileSafe = (label: string) => label.replace(/[\/\\:*?"<>|\s]+/g, '_')
 const shortModel = (model: string) => String(model || '').replace(/^gpt-/, '')
+// 模型和 effort 一起写；用 Fast 时前面加闪电，画的时候用 dimFast 把闪电标黄
+const modelText = (t: FlowTask) => `${t.fast ? FAST : ''}${shortModel(t.model)} ${t.effort}`
 const runKey = (runId: string) => `r:${runId}`
 const phaseKey = (title: string) => `p:${title}`
 const taskKey = (runId: string, label: string) => `t:${runId}:${label}`
@@ -103,10 +107,10 @@ function since(startedAt: string | null, endedAt: string | null, now: number) {
   return Math.max(0, Math.round((end - Date.parse(startedAt)) / 1000))
 }
 
-// 终端里中文占两格
+// 终端里中文和闪电（表情字符）占两格
 function cells(text: string) {
   let n = 0
-  for (const ch of text) n += (ch.codePointAt(0) ?? 0) >= 0x2e80 ? 2 : 1
+  for (const ch of text) n += (ch.codePointAt(0) ?? 0) >= 0x2e80 || ch === FAST ? 2 : 1
   return n
 }
 
@@ -154,6 +158,8 @@ function toRun(dir: string, state: any, now: number, alive: Set<number>): FlowRu
         phase: String(t.phase),
         model: String(t.model),
         effort: String(t.effort),
+        // 执行器记下请求的 tier（serviceTier）和 Codex 回报的 tier（actualServiceTier）；单发新开的 exec 没有回报
+        fast: (t.actualServiceTier ?? t.serviceTier) === 'priority',
         brief: String(t.brief ?? ''),
         status: status === 'lost' && t.status === 'running' ? 'lost' : String(t.status),
         seconds: since(t.startedAt ?? null, t.endedAt ?? null, now),
@@ -547,7 +553,7 @@ function currentRuns(list: FlowRun[]) {
 
 // agent 一行的说明：模型 effort · token · 状态（运行中和完成不写，图标已经表示）
 function agentStats(t: FlowTask) {
-  const parts = [`${shortModel(t.model)} ${t.effort}`]
+  const parts = [modelText(t)]
   if (t.tokens) parts.push(`${formatTokens(t.tokens)} tok`)
   if (t.status !== 'running' && t.status !== 'completed') parts.push(WORD[t.status] ?? t.status)
   return parts.join(' · ')
@@ -559,7 +565,7 @@ const agentTime = (t: FlowTask) => (t.reused ? '复用' : t.status === 'running'
 function runSubtext(run: FlowRun) {
   const task = run.tasks[0]
   if (run.kind === 'single' && task) {
-    const parts = [`${shortModel(task.model)} ${task.effort}`]
+    const parts = [modelText(task)]
     if (task.tokens) parts.push(`${formatTokens(task.tokens)} tok`)
     parts.push(WORD[run.status] ?? run.status, formatDuration(run.seconds))
     return parts.join(' · ')
@@ -923,6 +929,11 @@ export const register: Register = on => {
       return [...(above ? [above] : []), ...items, ...(below ? [below] : [])]
     }
 
+    // 暗色文字里的闪电单独画成黄色
+    const dimFast = (text: string) => text.split(FAST).flatMap((part, i) => [
+      ...(i ? [<Text color={YELLOW}>{FAST}</Text>] : []),
+      ...(part ? [<Text dimColor>{part}</Text>] : []),
+    ])
     // spin：运行中用的标记，默认是 agent 的细点阵
     const mark = (status: string, spin = agentSpinner) => {
       if (status === 'running') return <Text color={BLUE}>{spin}</Text>
@@ -986,7 +997,7 @@ export const register: Register = on => {
               <Text bold color={head.color} wrap="truncate-end">{head.name}</Text>
               {head.parts && cells(head.name) + cells(`  ${[head.sub, head.right].filter(Boolean).join(' · ')}`) <= width
                 ? drawParts([{ text: '  ' }, ...head.parts, ...(head.right ? [{ text: ` · ${head.right}` }] : [])])
-                : <Text dimColor wrap="truncate-end">  {[head.sub, head.right].filter(Boolean).join(' · ')}</Text>}
+                : dimFast(fit(`  ${[head.sub, head.right].filter(Boolean).join(' · ')}`, Math.max(1, width - cells(head.name))))}
             </Box>}
             {body}
             {filler}
@@ -1006,7 +1017,7 @@ export const register: Register = on => {
           <Box>
             <Text color={color}>╭─ </Text>
             <Text bold color={head.color}>{name}</Text>
-            {sub && head.parts && sub === `  ${head.sub}` ? drawParts([{ text: '  ' }, ...head.parts]) : sub ? <Text dimColor>{sub}</Text> : null}
+            {sub && head.parts && sub === `  ${head.sub}` ? drawParts([{ text: '  ' }, ...head.parts]) : sub ? dimFast(sub) : null}
             <Text color={color}> {'─'.repeat(topDash)}</Text>
             {right ? <Text dimColor>{right}</Text> : null}
             <Text color={color}>─╮</Text>
@@ -1123,9 +1134,7 @@ export const register: Register = on => {
               <Button plain key={key} label={fit(r.name, nameWidth - 1)} onPress={() => open(r)} />
             </Box>
             <Box width={statsWidth}>
-              <Text dimColor wrap="truncate-end">
-                {fit(statsOfRun(r), statsWidth - 1)}
-              </Text>
+              {dimFast(fit(statsOfRun(r), statsWidth - 1))}
             </Box>
             <Box width={7} justifyContent="flex-end">
               <Text dimColor>{formatDuration(r.seconds)}</Text>
@@ -1175,7 +1184,7 @@ export const register: Register = on => {
       return lines.length > room ? [...lines.slice(0, room - 1), { text: `… 还有 ${lines.length - room + 1} 行`, dim: true }] : lines
     }
     // 空行画一个空格：空 Text 不占行，两侧竖线会和内容错开
-    const draw = (l: Line) => (
+    const draw = (l: Line) => l.dim && l.text.includes(FAST) ? <Box>{dimFast(l.text)}</Box> : (
       <Text color={l.color} dimColor={l.dim} bold={l.bold} wrap="truncate-end">
         {l.text || ' '}
       </Text>
@@ -1378,7 +1387,7 @@ export const register: Register = on => {
               }} />
             </Box>
             <Box width={modelCell}>
-              <Text dimColor>{fit(`${shortModel(t.model)} ${t.effort}`, modelCell)}</Text>
+              {dimFast(fit(modelText(t), modelCell))}
             </Box>
             <Box width={TOKEN_SLOT} justifyContent="flex-end">
               <Text dimColor>{tokens}</Text>
@@ -1436,6 +1445,7 @@ export const register: Register = on => {
       const nodes: RenderElement[] = []
       let used = 0
       const put = (node: RenderElement, w: number) => { nodes.push(node); used += w }
+      const putDim = (text: string) => { nodes.push(...dimFast(text)); used += cells(text) }
       if (!showTitle) {
         const name = fit(run.name, Math.max(4, Math.floor(lineWidth / 3)))
         put(<Text bold color={PURPLE}>{name}</Text>, cells(name))
@@ -1449,7 +1459,7 @@ export const register: Register = on => {
       }
       // 行尾：这个阶段的 agent 用同一个模型和 effort 时写一次，不同时写在各自名称后；
       // 没有标题行时再写总 token 和总时长。放不下时依次省掉时长、模型、token，agent 名称优先
-      const models = [...new Set(agents.map(t => `${shortModel(t.model)} ${t.effort}`))]
+      const models = [...new Set(agents.map(modelText))]
       const shared = models.length === 1 ? models[0]! : ''
       const total = tokensOf(run.tasks)
       const tail = [shared, !showTitle && total ? `${formatTokens(total)} tok` : '', !showTitle ? formatDuration(run.seconds) : '']
@@ -1461,7 +1471,7 @@ export const register: Register = on => {
       for (let i = 0; i < agents.length; i++) {
         const t = agents[i]!
         const label = fit(t.label, 16)
-        const own = shared ? '' : ` ${shortModel(t.model)} ${t.effort}`
+        const own = shared ? '' : ` ${modelText(t)}`
         const piece = (i ? 2 : 0) + 2 + cells(label) + cells(own)
         const rest = agents.length - i
         const reserve = rest > 1 ? cells(` +${rest - 1}`) : 0
@@ -1472,9 +1482,9 @@ export const register: Register = on => {
         if (i) put(<Text>  </Text>, 2)
         put(mark(t.status), 1)
         put(<Text dimColor={t.status === 'running' ? undefined : true}>{` ${label}`}</Text>, 1 + cells(label))
-        if (own) put(<Text dimColor>{own}</Text>, cells(own))
+        if (own) putDim(own)
       }
-      if (tailText()) put(<Text dimColor>{tailText()}</Text>, cells(tailText()))
+      if (tailText()) putDim(tailText())
       if (note) put(<Text color={CYAN}>{note}</Text>, cells(note))
       // 摘要里没有可选项，不写操作提示（原因写在 README）；停止键只留阶段栏的「停止整个 flow」，免得停掉看不见的 agent。
       // 有别的任务时留返回键，直接回列表（摘要里各层画得一样，逐层退看不出变化）

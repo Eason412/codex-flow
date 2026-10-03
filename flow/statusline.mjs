@@ -17,7 +17,10 @@ const purple = rgb("BB9AF7");
 const cyan = rgb("7DCFFF");
 const green = rgb("9ECE6A");
 const red = rgb("F7768E");
+const yellow = rgb("E0AF68");
 const RECENT_SECONDS = 30;
+// 用 Fast（service tier 为 priority）的模型前面标黄色闪电，和面板一致
+const fast = (t) => ((t.actualServiceTier ?? t.serviceTier) === "priority" ? yellow("⚡") : "");
 
 let session = null;
 try {
@@ -46,7 +49,7 @@ for (const { state } of listRuns({ session, sinceMs: 2 * 86400000 }).sort((a, b)
   if (status === "running") {
     if (state.kind === "single") {
       const t = state.tasks[0];
-      items.push({ running: true, seconds: elapsedSeconds(state.startedAt), text: `${cyan("●")} ${nameOf(state)} ${dim(`${shortModel(t.model)} ${elapsed}`)}` });
+      items.push({ running: true, seconds: elapsedSeconds(state.startedAt), text: `${cyan("●")} ${nameOf(state)} ${fast(t)}${dim(`${shortModel(t.model)} ${elapsed}`)}` });
     } else {
       const phase = state.phases.find((p) => p.status === "running") ?? state.phases.at(-1);
       const inPhase = state.tasks.filter((t) => t.phase === phase.title);

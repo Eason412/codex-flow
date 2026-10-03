@@ -4,6 +4,8 @@ export type FlowTask = {
   phase: string
   model: string
   effort: string
+  // 用 Fast（service tier 为 priority）：以 Codex 回报的为准，核实不了时按请求算
+  fast: boolean
   brief: string
   status: string
   seconds: number

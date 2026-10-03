@@ -1410,3 +1410,49 @@ test('光标按树序走时两处改道：agent 栏第一项按 ↑ 回到当前
   expect(await ui.find({ text: ' 性能 · 2/2 ' })).toBeDefined()
   await ui.unmount()
 })
+
+test('用 Fast 的模型前面标黄色闪电：列表、agent 栏、agent 详情和单个 agent 的标题都有，没用 Fast 的不标，面板宽度不变', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  const width = async () => { const root = await ui.drawn(); return 'props' in root ? (root.props as { width?: number }).width : undefined }
+  const before = await width()
+  expect(await ui.find({ type: 'Text', text: '⚡' })).toBeUndefined()
+  // flow 里 sol 的 agent 由 Codex 回报用了 priority；单发只登记了请求（新开的 exec 核实不了），也算 Fast
+  const sol = (t: (typeof flowState.tasks)[number]) => (t.model === 'gpt-6.1-sol' ? { ...t, serviceTier: 'priority', actualServiceTier: 'priority' } : t)
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, tasks: flowState.tasks.map(sol) })
+  w.files[`${ROOT}/s-1/state.json`] = JSON.stringify({ ...singleState, tasks: [{ ...singleState.tasks[0], serviceTier: 'priority' }] })
+  await clock.advance(2_000)
+  const bolts = async () => (await ui.findAll({ type: 'Text', text: '⚡' })).filter(t => t.props.color === '#E0AF68')
+  // 列表：单个 agent 那一行的说明以闪电开头，后面照常是暗色的模型和 effort
+  expect(await bolts()).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: /^6\.1-sol high/ })).toBeDefined()
+  expect(await width()).toBe(before)
+  // agent 栏：两个 sol 的 agent 各一个闪电
+  await ui.press({ key: 'r:r-1' })
+  expect(await bolts()).toHaveLength(2)
+  expect(await width()).toBe(before)
+  // Codex 回报的 tier 不是 priority 时不标
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, tasks: flowState.tasks.map(t => ({ ...sol(t), ...(t.label === '安全' ? { actualServiceTier: 'default' } : {}) })) })
+  await clock.advance(2_000)
+  expect(await bolts()).toHaveLength(1)
+  // astra 没用 Fast
+  await ui.press({ key: 'p:复核' })
+  expect(await ui.find({ text: '6-astra high' })).toBeDefined()
+  expect(await bolts()).toHaveLength(0)
+  // agent 详情的第一行
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'p:审查' })
+  await ui.press({ key: 't:r-1:性能' })
+  expect(await bolts()).toHaveLength(1)
+  // 单个 agent 的标题
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'r:s-1' })
+  expect(await bolts()).toHaveLength(1)
+  expect(await width()).toBe(before)
+  await ui.unmount()
+})

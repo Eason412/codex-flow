@@ -20,7 +20,12 @@ export function readModelConfig(file = fileURLToPath(new URL("../../models.json"
   if (!config || !valid(config.models) || !valid(config.efforts)) {
     throw new Error(`模型名单格式错误: ${file}（models 和 efforts 必须是非空、不重复的字符串数组）`);
   }
-  return config;
+  // fast：默认用 Fast（service_tier=priority）的模型，可省略；只能写 models 里有的
+  const fast = config.fast ?? [];
+  if (!(Array.isArray(fast) && (fast.length === 0 || valid(fast)) && fast.every((m) => config.models.includes(m)))) {
+    throw new Error(`模型名单格式错误: ${file}（fast 必须是 models 里的模型，不重复）`);
+  }
+  return { ...config, fast };
 }
 
 // 只在执行前校验时读取；查看状态和状态行不依赖模型名单。
@@ -28,6 +33,11 @@ export function checkModelEffort(model, effort, label) {
   const { models, efforts } = readModelConfig();
   if (!models.includes(model)) throw new Error(`任务「${label}」的模型 ${model} 不在允许范围: ${models.join(" / ")}`);
   if (!efforts.includes(effort)) throw new Error(`任务「${label}」的 effort ${effort} 不在允许范围: ${efforts.join(" / ")}`);
+}
+
+// 默认用 Fast 的模型返回要请求的 service tier，其余返回 null
+export function serviceTierOf(model) {
+  return readModelConfig().fast.includes(model) ? "priority" : null;
 }
 
 export const nowIso = () => new Date().toISOString();

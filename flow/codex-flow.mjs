@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { AppServer } from "./lib/appserver.mjs";
 import {
   RUNS, briefOf, effectiveStatus, elapsedSeconds, formatDuration,
-  checkModelEffort, isAlive, listRuns, newRunId, nowIso, promptHash, pruneOldRuns, readJson, runDir, statePath, writeJson,
+  checkModelEffort, serviceTierOf, isAlive, listRuns, newRunId, nowIso, promptHash, pruneOldRuns, readJson, runDir, statePath, writeJson,
 } from "./lib/state.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -506,9 +506,12 @@ async function runTask(dir, state, task, prompt, cwd) {
     const schema = loadSchema(task.schema);
     const thread = await server.request("thread/start", {
       cwd, model: task.model, approvalPolicy: "never", sandbox: "danger-full-access", ephemeral: false,
+      ...(task.serviceTier ? { serviceTier: task.serviceTier } : {}),
     });
     task.threadId = thread.thread?.id ?? null;
     task.actualModel = thread.model ?? null;
+    // Codex 回报这个 thread 实际用的 tier（priority 即 Fast）
+    task.actualServiceTier = thread.serviceTier ?? null;
     const turn = await server.request("turn/start", {
       threadId: task.threadId,
       input: [{ type: "text", text: prompt, text_elements: [] }],
@@ -719,12 +722,14 @@ async function runFlow(planFile, resumeId) {
     if (old.scope && !sameJson(old.writes, t.writes)) entry.scope = rescope(old.scope, t);
     return entry;
   };
+  // models.json 里默认用 Fast 的模型记下请求的 tier，开 thread 时带上
+  const tierOf = (model) => (serviceTierOf(model) ? { serviceTier: serviceTierOf(model) } : {});
   for (const [label, t] of planTasks) {
     const old = previous?.tasks?.find((o) => o.label === label);
     const contract = { writes: t.writes, checks: t.checks };
     state.tasks.push(canReuse(label)
       ? reuse(old, t)
-      : { label, phase: t.phase, model: t.model, effort: t.effort, brief: t.brief || briefOf(literal(t.prompt)), hash: promptHash(t), status: "pending",
+      : { label, phase: t.phase, model: t.model, effort: t.effort, ...tierOf(t.model), brief: t.brief || briefOf(literal(t.prompt)), hash: promptHash(t), status: "pending",
           needs: deps.get(label), ...contract, ...(t.schema ? { schema: t.schema } : {}), ...(t.cwd && t.cwd !== cwd ? { cwd: t.cwd } : {}) });
   }
   current = { dir, state };
@@ -859,7 +864,9 @@ function renderSummary(dir, state) {
     let tail = t.result ? path.join(dir, t.result) : t.error ? t.error : t.status;
     if (t.reused) tail += "（复用上次结果）";
     if (t.actualModel && t.actualModel !== t.model) tail += `  ⚠ 实际模型 ${t.actualModel}`;
-    lines.push(`${GLYPH[t.status] ?? "?"} ${t.label}${" ".repeat(width - cells(t.label))}  ${t.model} ${t.effort}  ${time.padStart(6)}  ${tail}`);
+    if (t.serviceTier && t.actualServiceTier && t.actualServiceTier !== t.serviceTier) tail += `  ⚠ 请求 Fast，实际 tier ${t.actualServiceTier}`;
+    const fast = (t.actualServiceTier ?? t.serviceTier) === "priority" ? " ⚡" : "";
+    lines.push(`${GLYPH[t.status] ?? "?"} ${t.label}${" ".repeat(width - cells(t.label))}  ${t.model} ${t.effort}${fast}  ${time.padStart(6)}  ${tail}`);
     const list = (files) => (files.length > 5 ? `${files.slice(0, 5).join("、")} 等 ${files.length} 个` : files.join("、"));
     if (t.checkResults?.length && t.status === "completed") lines.push(`    验收 ${t.checkResults.length}/${t.checks?.length ?? t.checkResults.length} 通过`);
     if (t.scope?.outside?.length) lines.push(`    ⚠ 越界写入：${list(t.scope.outside)}`);
@@ -958,7 +965,7 @@ async function cmdWatch(argv) {
 
 // ---------- run.sh 用的单发登记 ----------
 
-const SINGLE_FLAGS = ["dir", "model", "effort", "label", "pid", "cwd", "thread-id", "forked-from", "task-file"];
+const SINGLE_FLAGS = ["dir", "model", "effort", "service-tier", "label", "pid", "cwd", "thread-id", "forked-from", "task-file"];
 
 function cmdSingleStart(argv) {
   const { flags } = parseArgs(argv, SINGLE_FLAGS);
@@ -975,7 +982,7 @@ function singleState(flags, task, startedAt) {
     version: 1, kind: "single", runId: path.basename(flags.dir), name: label, session: SESSION,
     pid: Number(flags.pid), cwd: path.resolve(flags.cwd), alertAfter: ALERT_AFTER, status: "running", startedAt, endedAt: null,
     phases: [{ title: "任务", status: "running" }],
-    tasks: [{ label, phase: "任务", model: flags.model, effort: flags.effort, threadId: flags["thread-id"] || null, resumed: Boolean(flags["thread-id"]), forkedFrom: flags["forked-from"] || null,
+    tasks: [{ label, phase: "任务", model: flags.model, effort: flags.effort, ...(flags["service-tier"] ? { serviceTier: flags["service-tier"] } : {}), threadId: flags["thread-id"] || null, resumed: Boolean(flags["thread-id"]), forkedFrom: flags["forked-from"] || null,
       brief: briefOf(task), status: "running", startedAt, log: "events.jsonl" }],
   };
 }
@@ -1200,7 +1207,9 @@ export function singleContext(threadId, startedAt, endedAt) {
   const root = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
   let found = false;
   let context = null;
+  let tier = null;
   let latest = Date.parse(startedAt);
+  let tierAt = latest;
   const end = Date.parse(endedAt);
   // Codex exec 事件没有 turn id；同一 thread 在时间窗内被并发续跑时，无法区分各轮 context。
   function visit(dir) {
@@ -1223,12 +1232,18 @@ export function singleContext(threadId, startedAt, endedAt) {
             latest = timestamp;
             context = event.payload;
           }
+          // 续聊和分叉会写 thread_settings_applied，里面有实际的 service tier；新开的 exec 不写
+          const settings = event.payload?.type === "thread_settings_applied" ? event.payload.thread_settings : null;
+          if (settings && typeof settings.service_tier === "string" && timestamp >= tierAt && timestamp <= end) {
+            tierAt = timestamp;
+            tier = settings.service_tier;
+          }
         }
       }
     }
   }
   if (threadId) visit(root);
-  return { found, context };
+  return { found, context, tier };
 }
 
 function readableSingleError(message) {
@@ -1241,13 +1256,17 @@ function readableSingleError(message) {
 
 function reportSingle(dir, code, state, events) {
   const task = state.tasks[0];
-  const { found, context } = singleContext(task.threadId, state.startedAt, state.endedAt);
+  const { found, context, tier } = singleContext(task.threadId, state.startedAt, state.endedAt);
   task.actualModel = context?.model ?? null;
   task.actualEffort = context?.effort ?? null;
+  task.actualServiceTier = tier;
   writeJson(statePath(dir), state);
   process.stdout.write(`[codex] thread: ${task.threadId || "未知"}\n`);
   if (context) {
-    process.stdout.write(`[codex] 实际使用: model=${context.model ?? "None"} effort=${context.effort ?? "None"} sandbox=${context.sandbox_policy?.type ?? "?"}（来自 Codex 会话记录）\n`);
+    const tierText = tier ? ` service_tier=${tier}` : "";
+    process.stdout.write(`[codex] 实际使用: model=${context.model ?? "None"} effort=${context.effort ?? "None"}${tierText} sandbox=${context.sandbox_policy?.type ?? "?"}（来自 Codex 会话记录）\n`);
+    if (task.serviceTier && !tier) process.stdout.write(`[codex] Fast: 已请求 service_tier=${task.serviceTier}；新开的 exec 会话记录不写 tier，无法核实\n`);
+    else if (task.serviceTier && tier !== task.serviceTier) process.stdout.write(`[codex] ⚠ 请求的是 Fast（service_tier=${task.serviceTier}），实际 ${tier}\n`);
     // 和原报告的 os.path.realpath 一样，不要求路径的所有部分仍然存在。
     const realpath = (cwd) => {
       const absolute = path.resolve(cwd);
@@ -1317,6 +1336,7 @@ function endSingle(dir, code, flags = {}) {
   settleSingleTokens(task, state.startedAt, at, usage);
   task.actualModel = null;
   task.actualEffort = null;
+  task.actualServiceTier = null;
   if (fs.existsSync(path.join(dir, "last.md"))) task.result = "last.md";
   const ok = code === "0" && finished;
   const status = ok ? "completed" : stopped ? "cancelled" : "failed";
@@ -1418,9 +1438,11 @@ function cmdSingleEnd(argv) {
   }
 }
 
+// run.sh 开跑前调用：模型或 effort 不在名单里就拦下；默认用 Fast 的模型输出要请求的 service tier
 function cmdCheck(argv) {
   const { flags } = parseArgs(argv, ["model", "effort", "label"]);
   try { checkModelEffort(flags.model, flags.effort, flags.label || "任务"); } catch (error) { die(error.message); }
+  process.stdout.write(serviceTierOf(flags.model) ?? "");
 }
 
 // ---------- 入口 ----------
