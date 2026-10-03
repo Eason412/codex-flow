@@ -59,7 +59,7 @@ With several tasks, each gets one row: flows stay above single agents, newer tas
 
 Inside an agent, the right column shows its brief, its progress (counts of commands, file edits and messages, plus the latest steps) and its result, and the left column switches to other agents in the same phase. A running flow task has a steer field below: press `Enter` on the current agent to reach it, type an instruction and press `Enter`; the executor sends it to that task with Codex's turn/steer within a second, and progress shows whether it was delivered or rejected. Letters typed in the field never trigger `x`, `b` or `q`. Tasks in acceptance checks, finished tasks and single agents have no steer field: during checks Codex has already finished, and single agents run under `run.sh`, which cannot take steering.
 
-![Agent detail: brief, progress, result and steer field](docs/images/panel-agent.png)
+![Agent detail: brief, progress and steer field](docs/images/panel-agent.png)
 
 | Key | Action |
 | --- | --- |

@@ -59,7 +59,7 @@ mod 只负责显示和提醒；mod 未加载时，任务照常运行。运行记
 
 进入 agent 后，右栏显示任务说明、过程（命令、改文件和消息的次数，以及最近几步）和结果，左栏可切换到同阶段的其他 agent。运行中的 flow 任务下面有插话框：在当前 agent 上按 `Enter` 进入，输入补充指示后按 `Enter`，执行器在 1 秒内用 Codex 的 turn/steer 发给这个任务，送达或被拒都会写进过程。插话框里输入的字母不会触发 `x`、`b`、`q`。验收中、已结束的任务和单个 agent 没有插话框：验收时 Codex 已经结束，单个 agent 由 `run.sh` 运行，收不到插话。
 
-![agent 详情：任务说明、过程、结果与插话框](docs/images/panel-agent.png)
+![agent 详情：任务说明、过程与插话框](docs/images/panel-agent.png)
 
 | 按键 | 作用 |
 | --- | --- |
