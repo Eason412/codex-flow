@@ -49,15 +49,29 @@ description: "把边界清楚、能独立完成的子任务交给 Codex CLI 执�
 node ~/.claude/skills/codex/flow/codex-flow.mjs run <plan.json>
 ```
 
+## 怎么拆（写计划前先定，形状每次按工作本身定）
+
+阶段数和每阶段的任务数没有固定套路，不要照搬上一次的计划或下面的示例。
+
+- **任务数看独立的写入范围**：同一阶段并行的任务各改各的文件，也不等对方的中间结果。同一个文件不拆给两个并行任务。只有一个任务时用 run.sh，不写 flow。
+- **阶段按真实依赖分**：后面的工作要用到前面定下的接口、数据结构或结论，才分成先后两个阶段。不依赖的放在同一阶段；只有部分任务有依赖时用 `after` 做流水线，不为对齐而加阶段，也不为凑满而合并。
+- **单个任务控制在 10–30 分钟**：预计更长，或者规格里有几块先后依赖的工作（例如先定数据结构和核心转换，再并行写检查、命令行和测试），就拆成几个阶段。每段开新的 Codex 对话，只读上一段的结果和仓库现状。对话越长，每次调用重发的上下文越多：2026-10-03 的一个调研任务调用 28 次，上下文从约 1.9 万涨到约 18.9 万 token，累计输入约 307 万。
+- **审查按风险加，不按惯例加**：只有很高难度的改动，或者验收命令证明不了正确性的改动，才加审查任务，例如行为等价的大重构、新检查规则的误报和漏报；一份改动配一个审查。改动小、验收命令已经能证明的，不加审查。用户要求的 Sonnet 交叉核对由主 agent 另派，不算进 flow。
+- **开跑前说明形状**：告诉用户分几个阶段、每阶段几个任务、为什么这样拆。
+
+下面的示例只演示字段怎么写：先定核心接口，再在三个不重叠的目录里并行实现，只有风险最高的「转换」配审查。
+
 ```json
-{"name": "docs", "cwd": "/path/to/repos",
+{"name": "export", "cwd": "/path/to/repo",
  "phases": [
-   {"title": "撰写", "tasks": [
-     {"label": "甲文档", "model": "gpt-6.1-sol", "effort": "high", "cwd": "repo-a", "promptFile": "write-a.md"},
-     {"label": "乙文档", "model": "gpt-6.1-sol", "effort": "high", "cwd": "repo-b", "promptFile": "write-b.md"}]},
+   {"title": "核心", "tasks": [
+     {"label": "数据结构", "model": "gpt-6.1-sol", "effort": "high", "promptFile": "core.md", "writes": ["src/core"], "checks": ["npm test -- core"]}]},
+   {"title": "实现", "tasks": [
+     {"label": "转换", "model": "gpt-6.1-sol", "effort": "high", "writes": ["src/convert"], "prompt": "{{file:convert.md}}\n核心接口：{{phase:核心}}"},
+     {"label": "检查", "model": "gpt-6.1-sol", "effort": "high", "promptFile": "check.md", "writes": ["src/check"]},
+     {"label": "命令行", "model": "gpt-6.1-sol", "effort": "high", "promptFile": "cli.md", "writes": ["src/cli"]}]},
    {"title": "审查", "tasks": [
-     {"label": "甲审查", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "cwd": "repo-a", "after": ["甲文档"], "prompt": "{{file:review.md}}\n撰写结果：{{task:甲文档}}"},
-     {"label": "汇总", "model": "gpt-6-astra", "effort": "high", "prompt": "复核：\n{{phase:撰写}}"}]}]}
+     {"label": "转换审查", "model": "gpt-6-astra", "effort": "high", "schema": "review", "after": ["转换"], "writes": [], "prompt": "{{file:review.md}}\n实现结果：{{task:转换}}"}]}]}
 ```
 
 - 调度：没写 `after` 的任务等上一阶段全部结束，同一阶段的任务并行，数量不设上限。写了 `after`（任务名或阶段标题的数组）的任务只等列出的任务，前置一完成就开跑，不等同阶段的慢任务；上例「甲审查」在「甲文档」写完后立刻开始，不等「乙文档」。要流水线就写 `after`，不写就是按阶段顺序。
