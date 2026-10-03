@@ -53,6 +53,8 @@ const working = atom({ plugin: 'codex-flow', key: 'working' } as const, false)
 // 输入框上方是否显示面板：/flow 打开，全部结束后 q 关闭
 const shown = atom({ plugin: 'codex-flow', key: 'shown' } as const, false)
 const opened = atom({ plugin: 'codex-flow', key: 'opened' } as const, [] as string[])
+// 面板这次打开后出现过的任务：结束后仍留在列表下方，面板关掉时清空
+const kept = atom({ plugin: 'codex-flow', key: 'kept' } as const, [] as string[])
 const auto = atom({ plugin: 'codex-flow', key: 'auto' } as const, false)
 const frame = atom({ plugin: 'codex-flow', key: 'frame' } as const, 0)
 const steerRound = atom({ plugin: 'codex-flow', key: 'steerRound' } as const, 0)
@@ -339,6 +341,10 @@ async function readRuns($: Engine) {
   logErrors()
   await update($, runs, () => list)
   await autoShow($, list)
+  if (await read($, shown)) {
+    const ids = currentRuns(list).map(r => r.runId)
+    await update($, kept, old => (ids.every(id => old.includes(id)) ? old : [...old, ...ids.filter(id => !old.includes(id))].slice(-50)))
+  }
   await syncWindows($)
   await remind($, list)
   // 结果页打开时任务刚好出了结果，补读一次
@@ -366,7 +372,10 @@ async function changePanel($: Engine, decide: () => Promise<boolean>) {
 
 // 只在 panelChanges 内调用；完整记下这次 shown/auto 的来源。
 async function applyShown($: Engine, value: boolean, by: PanelRecord['by'], isAuto = false) {
-  if (!value) ringAt = null
+  if (!value) {
+    ringAt = null
+    await update($, kept, () => [])
+  }
   await update($, shown, () => value)
   await update($, auto, () => value && isAuto)
   latestPanel = { shown: value, auto: value && isAuto, by }
@@ -407,9 +416,9 @@ async function autoShow($: Engine, list: FlowRun[]) {
     if (fresh.length) {
       await update($, opened, old => [...old, ...fresh.map(r => r.runId)].slice(-100))
       const at = await read($, nav)
-      const watching = running.some(r => r.runId === at.runId)
+      const watching = list.some(r => r.runId === at.runId)
       const visible = await read($, shown)
-      if (!visible || !watching) await moveTo($, entry(list).to)
+      if (!visible || !watching) await moveTo($, entry(listedRuns(list, visible ? await read($, kept) : [], null)).to)
       if (!visible) return applyShown($, true, 'auto-open', true)
       return false
     }
@@ -543,13 +552,33 @@ function wrap(text: string, width: number) {
   return lines
 }
 
-// 只显示当前的：在跑的和刚结束（RECENT 秒内）的，都没有就留最近一个；更早的记录留给主 Agent 用 codex-flow status 查
+// 当前的任务：在跑的和刚结束（RECENT 秒内）的，都没有就留最近一个；面板里实际列出的见 listedRuns，更早的记录留给主 Agent 用 codex-flow status 查
 // flow 固定排在单个 agent 上面；同类里保持新的在上，任务结束也不挪位置
 function currentRuns(list: FlowRun[]) {
   const cur = list.filter(r => r.status === 'running' || (r.endedSeconds !== null && r.endedSeconds < RECENT))
   const rank = (r: FlowRun) => (r.kind === 'flow' ? 0 : 1)
   return cur.length ? cur.sort((a, b) => rank(a) - rank(b)) : list.slice(0, 1)
 }
+
+// 面板列出的任务：当前的在上；面板这次打开后出现过、已结束的排在下面（新结束的在上，最多 KEEP 个），面板关掉前不消失；
+// 正在看的那个总在列表里，所以看它时总能返回列表
+const KEEP = 5
+function listedRuns(list: FlowRun[], keptIds: string[], viewing: string | null) {
+  const cur = currentRuns(list)
+  const ended = list
+    .filter(r => !cur.includes(r) && (keptIds.includes(r.runId) || r.runId === viewing))
+    .sort((a, b) => (a.endedSeconds ?? Infinity) - (b.endedSeconds ?? Infinity))
+  const shownEnded = ended.slice(0, KEEP)
+  const viewed = ended.find(r => r.runId === viewing)
+  return [...cur, ...shownEnded, ...(viewed && !shownEnded.includes(viewed) ? [viewed] : [])]
+}
+
+async function listed($: Engine) {
+  return listedRuns(await read($, runs), await read($, kept), (await read($, nav)).runId)
+}
+
+// 结束超过 RECENT 秒、排在下面一组的任务画暗
+const faded = (r: FlowRun) => r.status !== 'running' && !(r.endedSeconds !== null && r.endedSeconds < RECENT)
 
 // agent 一行的说明：模型 effort · token · 状态（运行中和完成不写，图标已经表示）
 function agentStats(t: FlowTask) {
@@ -589,9 +618,8 @@ function phaseTime(run: FlowRun, title: string) {
 // 进入一个 flow 时先选中正在跑的阶段，没有就选第一个
 const defaultPhase = (run: FlowRun) => (run.phases.find(p => p.status === 'running') ?? run.phases[0])?.title ?? null
 
-// 打开面板时的位置：当前只有一个 flow 就直接进它的阶段栏；单个 agent、多个任务都先列出来
-function entry(list: FlowRun[]): { to: Nav; key: string | null } {
-  const cur = currentRuns(list)
+// 打开面板时的位置：列出的只有一个 flow 就直接进它的阶段栏；单个 agent、多个任务都先列出来
+function entry(cur: FlowRun[]): { to: Nav; key: string | null } {
   const run = cur.length === 1 && cur[0]?.kind === 'flow' ? cur[0] : undefined
   if (!run) {
     const first = cur.find(r => r.status === 'running') ?? cur[0]
@@ -601,14 +629,15 @@ function entry(list: FlowRun[]): { to: Nav; key: string | null } {
   return { to: { runId: run.runId, level: 'phases' as const, phase, label: null, text: null }, key: phase ? phaseKey(phase) : null }
 }
 
-// 退一层：agent 详情 → agent 栏 → 阶段栏 → 任务列表（只有一个当前 flow 时阶段栏就是最外层；单个 agent 的详情直接回列表）；null 表示已在最外层
+// 退一层：agent 详情 → agent 栏 → 阶段栏 → 任务列表（列表里只有这一个 flow 时阶段栏就是最外层；单个 agent 的详情直接回列表）；null 表示已在最外层
+// list 传 listedRuns 的结果
 function up(list: FlowRun[], at: Nav): { to: Nav; key: string | null } | null {
   const run = list.find(r => r.runId === at.runId)
   if (!run || !at.level) return null
   if (run.kind === 'single') return { to: TOP, key: runKey(run.runId) }
   if (at.level === 'agent') return { to: { ...at, level: 'agents' as const, text: null }, key: at.label ? taskKey(run.runId, at.label) : null }
   if (at.level === 'agents' && run.kind === 'flow') return { to: { ...at, level: 'phases' as const, label: null }, key: at.phase ? phaseKey(at.phase) : null }
-  if (currentRuns(list).length > 1) return { to: TOP, key: runKey(run.runId) }
+  if (list.length > 1) return { to: TOP, key: runKey(run.runId) }
   return null
 }
 
@@ -646,9 +675,10 @@ async function moveTo($: Engine, to: Nav) {
   await syncWindows($)
 }
 
+// list 传 listedRuns 的结果
 function columnKeys(list: FlowRun[], at: Nav, column: WindowColumn): string[] {
   const run = list.find(r => r.runId === at.runId)
-  if (column === 'runs') return !run || !at.level ? currentRuns(list).map(r => runKey(r.runId)) : []
+  if (column === 'runs') return !run || !at.level ? list.map(r => runKey(r.runId)) : []
   if (!run || run.kind !== 'flow') return []
   // 阶段栏和 agent 栏两栏随时可选；详情时左栏换成这个阶段的 agent
   const columnsShown = at.level === 'phases' || at.level === 'agents'
@@ -677,8 +707,9 @@ async function syncWindows($: Engine) {
   const phaseIndex = run?.phases.findIndex(p => p.title === phase) ?? -1
   const runningIndex = agents.findIndex(t => t.status === 'running')
   const hotIndex = run ? agents.findIndex(t => taskKey(run.runId, t.label) === hot) : -1
+  const listedCount = listedRuns(list, await read($, kept), at.runId).length
   await update($, windows, old => ({
-    runs: windowStart(old.runs, currentRuns(list).length, windowSize),
+    runs: windowStart(old.runs, listedCount, windowSize),
     phases: windowStart(old.phases, run?.phases.length ?? 0, windowSize, phaseIndex),
     agents: windowStart(old.agents, agents.length, windowSize, at.level === 'agents' ? hotIndex : runningIndex),
     detailAgents: windowStart(old.detailAgents, agents.length, windowSize, agents.findIndex(t => t.label === at.label)),
@@ -689,7 +720,7 @@ async function revealFocus($: Engine, key: string) {
   const list = await read($, runs)
   const at = await read($, nav)
   for (const column of Object.keys(EMPTY_WINDOWS) as WindowColumn[]) {
-    const keys = columnKeys(list, at, column)
+    const keys = columnKeys(listedRuns(list, await read($, kept), at.runId), at, column)
     const index = keys.indexOf(key)
     if (index < 0) continue
     await update($, windows, old => ({ ...old, [column]: windowStart(old[column], keys.length, windowSize, index) }))
@@ -713,7 +744,7 @@ async function trackFocus($: Engine, key: string) {
 
 async function shiftWindow($: Engine, column: WindowColumn, direction: 'up' | 'down') {
   const at = await read($, nav)
-  const keys = columnKeys(await read($, runs), at, column)
+  const keys = columnKeys(await listed($), at, column)
   if (!keys.length) return
   const hot = await read($, focused)
   const preferred = keys.includes(hot ?? '') ? hot : column === 'phases' && at.phase ? phaseKey(at.phase) : column === 'detailAgents' && at.label ? detailKey(at.runId ?? '', at.label) : null
@@ -729,7 +760,7 @@ async function shiftWindow($: Engine, column: WindowColumn, direction: 'up' | 'd
 }
 
 async function goBack($: Engine) {
-  const back = up(await read($, runs), await read($, nav))
+  const back = up(await listed($), await read($, nav))
   if (!back) return
   await moveTo($, back.to)
   await focusOn($, back.key)
@@ -843,7 +874,7 @@ export const register: Register = on => {
       return { text: 'Codex 任务面板已经在输入框上方。如果那里只剩一行「▸ plugin panel hidden」，那是 Claude Code 自带的折叠：点一下那一行，或按 ctrl+x ctrl+a，就能展开。' }
     }
     await refresh($, true)
-    const start = entry(await read($, runs))
+    const start = entry(listedRuns(await read($, runs), [], null))
     await moveTo($, start.to)
     await setShown($, true, 'command')
 
@@ -878,6 +909,7 @@ export const register: Register = on => {
     const Input = 'Input' in elements ? elements.Input : null
     const list = await read($, runs)
     const at = await read($, nav)
+    const shownRuns = listedRuns(list, await read($, kept), at.runId)
     const hot = await read($, focused)
     const tick = await read($, frame)
     const round = await read($, steerRound)
@@ -1038,9 +1070,9 @@ export const register: Register = on => {
       )
     }
 
-    // 最外层：单个 agent、多个任务时一行一个，类型标在名称前（flow 紫色、agent 蓝色）
+    // 最外层：单个 agent、多个任务时一行一个，类型标在名称前（flow 紫色、agent 蓝色）；结束一会儿的排在下面、画暗
     if (!run || !at.level) {
-      const cur = currentRuns(list)
+      const cur = shownRuns
       if (!cur.length) {
         const message = '本会话还没有派出 Codex 任务。'
         const foot: Foot = { hints: [], stop: null, canBack: false }
@@ -1112,7 +1144,7 @@ export const register: Register = on => {
           if (i) put(<Text>  </Text>, 2)
           put(mark(r.status, r.kind === 'flow' ? spinner : agentSpinner), 1)
           put(<Text> </Text>, 1)
-          put(<Button plain key={runKey(r.runId)} label={name} onPress={() => open(r)} />, cells(name))
+          put(<Button plain dimColor={faded(r) || undefined} key={runKey(r.runId)} label={name} onPress={() => open(r)} />, cells(name))
           if (progress) put(<Text dimColor>{progress}</Text>, cells(progress))
         }
         const tail = !showTitle && totalText ? ` · ${totalText}` : ''
@@ -1128,10 +1160,10 @@ export const register: Register = on => {
             {mark(r.status, r.kind === 'flow' ? spinner : agentSpinner)}
             <Text> </Text>
             <Box width={6}>
-              <Text color={color}>{kind}</Text>
+              <Text color={color} dimColor={faded(r) || undefined}>{kind}</Text>
             </Box>
             <Box width={nameWidth}>
-              <Button plain key={key} label={fit(r.name, nameWidth - 1)} onPress={() => open(r)} />
+              <Button plain dimColor={faded(r) || undefined} key={key} label={fit(r.name, nameWidth - 1)} onPress={() => open(r)} />
             </Box>
             <Box width={statsWidth}>
               {dimFast(fit(statsOfRun(r), statsWidth - 1))}
@@ -1190,9 +1222,11 @@ export const register: Register = on => {
       </Text>
     )
 
-    // 正在看某个任务时，新任务开始面板不跳走（免得打断正在看的内容），只在标题里提一句还有别的任务，按返回回到列表
-    const others = currentRuns(list).filter(r => r.runId !== run.runId).length
-    const othersNote = others ? `另有 ${others} 个任务` : ''
+    // 正在看某个任务时，新任务开始面板不跳走（免得打断正在看的内容），只在标题里提一句还有别的任务，按返回回到列表；
+    // 别的任务结束后仍在列表里，提示改成「已结束」，返回键也还在
+    const others = shownRuns.filter(r => r.runId !== run.runId)
+    const ended = others.filter(r => r.status !== 'running').length
+    const othersNote = !others.length ? '' : ended === others.length ? `另有 ${ended} 个任务已结束` : ended ? `另有 ${others.length} 个任务（${ended} 个已结束）` : `另有 ${others.length} 个任务`
     const withNote = (text: string) => [text, othersNote].filter(Boolean).join(' · ')
 
     // 单个 agent 的详情：一栏，名称蓝色，标题写模型、effort、token、状态、耗时；外框已有标题，不再套内框
@@ -1420,7 +1454,7 @@ export const register: Register = on => {
       </Box>
     )
     const running = run.status === 'running'
-    const back = up(list, at)
+    const back = up(shownRuns, at)
     const outer = !back
     const hints =
       level === 'phases' ? ['↑/↓ 选择', 'Enter 看 agent'] : level === 'agents' ? ['↑/↓ 选择', 'Enter 详情'] : steer ? ['↑/↓ 切换 agent', 'Enter 插话'] : ['↑/↓ 切换 agent']
@@ -1488,7 +1522,7 @@ export const register: Register = on => {
       if (note) put(<Text color={CYAN}>{note}</Text>, cells(note))
       // 摘要里没有可选项，不写操作提示（原因写在 README）；停止键只留阶段栏的「停止整个 flow」，免得停掉看不见的 agent。
       // 有别的任务时留返回键，直接回列表（摘要里各层画得一样，逐层退看不出变化）
-      const compact: Foot = { hints: [], stop: level === 'phases' ? stop : null, canBack: others > 0, back: '返回列表', toList: true }
+      const compact: Foot = { hints: [], stop: level === 'phases' ? stop : null, canBack: others.length > 0, back: '返回列表', toList: true }
       return shell(PURPLE, lineWidth, head, <Box width={lineWidth}>{nodes}</Box>, 1, compact)
     }
     return shell(PURPLE, columns, head, body, height + (framed ? 2 : 0), foot)

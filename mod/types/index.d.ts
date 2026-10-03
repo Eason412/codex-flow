@@ -79,6 +79,8 @@ declare module 'claude-code' {
       shown: boolean
       // 自动打开过的运行：用户收起后，同一批任务不再把面板弹出来
       opened: string[]
+      // 面板这次打开后出现过的运行：结束后仍列在下方，面板关掉时清空
+      kept: string[]
       // 面板是任务开始时自动打开的：全部结束 30 秒后自动收起；用户自己 /flow 打开的不自动收
       auto: boolean
       // 运行中星形动画的当前帧

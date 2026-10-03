@@ -1456,3 +1456,56 @@ test('用 Fast 的模型前面标黄色闪电：列表、agent 栏、agent 详�
   expect(await width()).toBe(before)
   await ui.unmount()
 })
+
+test('看一个 flow 时另一个结束：结束 30 秒后仍在列表下方、画暗，返回键和「已结束」提示都在；面板关掉后不再列出', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  const second = { ...flowState, runId: 'r-3', name: '第二个 flow', startedAt: iso(240) }
+  const finished = (state: typeof flowState, at: number) => ({
+    ...state, status: 'completed', endedAt: iso(at),
+    phases: state.phases.map(p => ({ ...p, status: 'completed' })),
+    tasks: state.tasks.map(t => ({ ...t, status: 'completed', startedAt: t.startedAt ?? iso(at - 10), endedAt: iso(at) })),
+  })
+  w.dirs = ['r-1', 'r-3']
+  w.files[`${ROOT}/r-3/state.json`] = JSON.stringify(second)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  await ui.press({ key: 'r:r-1' })
+  expect(await ui.find({ type: 'Text', text: /运行中 · 另有 1 个任务/ })).toBeDefined()
+  // 第二个 flow 结束：提示改成「已结束」；过了 30 秒仍在，返回键也在
+  w.files[`${ROOT}/r-3/state.json`] = JSON.stringify(finished(second, 255))
+  await clock.advance(2_000)
+  expect(await ui.find({ type: 'Text', text: /另有 1 个任务已结束/ })).toBeDefined()
+  await clock.advance(40_000)
+  expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /另有 1 个任务已结束/ })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'back' }))?.props.label).toBe('返回列表')
+  // 列表：在跑的在上，结束一会儿的在下面、画暗
+  await ui.press({ key: 'back' })
+  const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.key)).filter(k => k.startsWith('r:'))
+  expect(rows).toEqual(['r:r-1', 'r:r-3'])
+  expect((await ui.find({ type: 'Button', key: 'r:r-3' }))?.props.dimColor).toBe(true)
+  expect((await ui.find({ type: 'Button', key: 'r:r-1' }))?.props.dimColor).toBeUndefined()
+  // 看已结束的那个时又开了新任务：不跳走，标题提一句
+  await ui.press({ key: 'r:r-3' })
+  w.dirs = ['r-1', 'r-3', 'r-4']
+  w.files[`${ROOT}/r-4/state.json`] = JSON.stringify({ ...flowState, runId: 'r-4', name: '第三个 flow', startedAt: iso(290) })
+  await clock.advance(2_000)
+  expect(await ui.find({ type: 'Text', text: /^第二个 flow$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /另有 2 个任务/ })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'back' }))?.props.label).toBe('返回列表')
+  // 全部结束 30 秒后面板自动收起；下一个任务自动打开时只列当前的，只有它一个就直接进去，没有返回键
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(finished(flowState, 300))
+  w.files[`${ROOT}/r-4/state.json`] = JSON.stringify(finished({ ...flowState, runId: 'r-4', name: '第三个 flow', startedAt: iso(290) }, 300))
+  await clock.advance(40_000)
+  expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeUndefined()
+  w.dirs = ['r-1', 'r-3', 'r-4', 'r-5']
+  w.files[`${ROOT}/r-5/state.json`] = JSON.stringify({ ...flowState, runId: 'r-5', name: '第四个 flow', startedAt: iso(340) })
+  await clock.advance(2_000)
+  expect(await ui.find({ type: 'Text', text: /^第四个 flow$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /另有/ })).toBeUndefined()
+  await ui.unmount()
+})
