@@ -18,6 +18,9 @@ const RESULT_LIMIT = 9000
 const TERMINAL = new Set(['completed', 'partial', 'failed', 'cancelled'])
 // 结束后还显示多少秒，让用户看到 ✓/✗
 const RECENT = 30
+// 面板固定占的行数（含外框）：列表、flow 两栏和 agent 详情都画成同样大小，进出时只换布局、不跳，和 Claude Code 的 Workflow 面板一样。
+// 输入框上方放不下这么多行时按实际可用的行数画
+const PANEL_ROWS = 16
 const TOP: Nav = { runId: null, level: null, phase: null, label: null, text: null }
 
 // 配色取自用户 ccstatusline 的设置（Tokyo Night），和状态行那一行一致
@@ -881,10 +884,12 @@ export const register: Register = on => {
     if (!bandRows) return <Box flexDirection="column" />
     // 外框的上边写标题、下边放页脚，不另占行：输入框草稿变长、这块区域变矮时外框仍在。
     // 三行起画外框；只剩两行时一行标题一行内容，一行时只有内容
-    const shelled = bandRows >= 3
-    const showTitle = bandRows >= 2
+    const panelRows = Math.min(bandRows, PANEL_ROWS)
+    const shelled = panelRows >= 3
+    const showTitle = panelRows >= 2
+    // 宽度同样固定：各层都占满可用宽度（最宽 100 列）
     const columns = bandColumns - (shelled ? 4 : 0)
-    const rows = bandRows - (shelled ? 2 : Number(showTitle))
+    const rows = panelRows - (shelled ? 2 : Number(showTitle))
     const run = list.find(r => r.runId === at.runId)
     // flow 两栏的内框（栏标题和底线）占两行，放得下最多三行内容才画；高度不够时先省内框，外框保留
     const needRows = run?.kind === 'flow' && at.level
@@ -970,8 +975,10 @@ export const register: Register = on => {
       return nodes
     }
     // 外框：╭─ 名称  状态 ──── token · 时长 ─╮ … ╰─ 提示 · 按钮 ────╯，总宽 width + 4。
-    // body 必须正好 height 行，两侧竖线按行数画成两列。
-    const shell = (color: string, width: number, head: Head, body: RenderElement, height: number, foot: Foot) => {
+    // body 有 height 行，不足 rows 的用空行补齐（fixed=false 时不补），两侧竖线按补齐后的行数画成两列。
+    const shell = (color: string, width: number, head: Head, body: RenderElement, height: number, foot: Foot, fixed = true) => {
+      const pad = fixed ? Math.max(0, rows - height) : 0
+      const filler = Array.from({ length: pad }, () => <Text> </Text>)
       if (!shelled) {
         return (
           <Box flexDirection="column" width={width}>
@@ -982,6 +989,7 @@ export const register: Register = on => {
                 : <Text dimColor wrap="truncate-end">  {[head.sub, head.right].filter(Boolean).join(' · ')}</Text>}
             </Box>}
             {body}
+            {filler}
           </Box>
         )
       }
@@ -992,7 +1000,7 @@ export const register: Register = on => {
       const sub = head.sub && subRoom >= 6 ? `  ${fit(head.sub, subRoom - 2)}` : ''
       const topDash = Math.max(1, width - 2 - cells(name) - cells(sub) - cells(right))
       const bottom = footer(foot, width - 2)
-      const side = (text: string) => <Box flexDirection="column">{Array.from({ length: height }, () => <Text color={color}>{text}</Text>)}</Box>
+      const side = (text: string) => <Box flexDirection="column">{Array.from({ length: height + pad }, () => <Text color={color}>{text}</Text>)}</Box>
       return (
         <Box flexDirection="column" width={width + 4}>
           <Box>
@@ -1005,7 +1013,7 @@ export const register: Register = on => {
           </Box>
           <Box>
             {side('│ ')}
-            <Box flexDirection="column" width={width}>{body}</Box>
+            <Box flexDirection="column" width={width}>{body}{filler}</Box>
             {side(' │')}
           </Box>
           {bottom.width
@@ -1026,7 +1034,7 @@ export const register: Register = on => {
         const message = '本会话还没有派出 Codex 任务。'
         const foot: Foot = { hints: [], stop: null, canBack: false }
         const width = Math.min(columns, Math.max(cells(message), footerCells(foot) + 2, 12))
-        return shell(CYAN, width, { name: 'Codex', color: CYAN, sub: '' }, <Text dimColor>{message}</Text>, 1, foot)
+        return shell(CYAN, width, { name: 'Codex', color: CYAN, sub: '' }, <Text dimColor>{message}</Text>, 1, foot, false)
       }
       const win = windowed(cur, 'runs', r => runKey(r.runId), hot)
       const nameWidth = Math.min(24, Math.max(8, ...cur.map(r => cells(r.name) + 2)))
@@ -1052,11 +1060,8 @@ export const register: Register = on => {
         return parts.join(' · ')
       }
       const foot: Foot = { hints: ['ctrl+x tab 操作', '↑/↓ 选择', 'Enter 查看'], stop: null, canBack: false }
-      // token 会增长：已有 token 的按 999.9k 预留，运行中还没有 token 的预留「 · 999.9k tok」
-      const grow = (r: FlowRun) => { const n = tokensOf(r.tasks); return n ? 6 - formatTokens(n).length : r.status === 'running' ? cells(' · 999.9k tok') : 0 }
-      const statsWidth = Math.max(4, Math.min(columns - 17 - nameWidth, Math.max(...cur.map(r => cells(statsOfRun(r)) + grow(r))) + 1))
-      // 合计会增长，按 999.9k 预留，数字变长时方框不跳
-      const listWidth = Math.min(columns, Math.max(17 + nameWidth + statsWidth, cells(`Codex  ${summary}`) + (total || active ? cells(' 999.9k tok ') : 0) + 3, footerCells(foot) + 2))
+      // 一行：选中标记 2 + 图标 1 + 空格 1 + 类型 6 + 名称 + 说明 + 耗时 7；说明栏吃掉剩下的宽度，耗时贴右
+      const statsWidth = Math.max(4, columns - 17 - nameWidth)
       const listColor = flows && singles ? CYAN : flows ? PURPLE : BLUE
       const open = async (r: FlowRun) => {
         const phase = defaultPhase(r)
@@ -1128,7 +1133,7 @@ export const register: Register = on => {
           </Box>
         )
       }), 'runs', win, true)
-      return shell(listColor, listWidth, { name: 'Codex', color: CYAN, sub: summary, parts: summaryParts, right: totalText }, <Box flexDirection="column">{lines}</Box>, lines.length, foot)
+      return shell(listColor, columns, { name: 'Codex', color: CYAN, sub: summary, parts: summaryParts, right: totalText }, <Box flexDirection="column">{lines}</Box>, lines.length, foot)
     }
 
     type Line = { text: string; color?: string; dim?: boolean; bold?: boolean }
@@ -1188,8 +1193,7 @@ export const register: Register = on => {
       const named: Line[] = showTitle ? [] : [{ text: `${run.name}  ${withNote(runSubtext(run))}`, color: BLUE, bold: true }]
       const lines = clip([...named, ...(single ? card(single, columns) : [{ text: '没有记录。', dim: true }])])
       const foot: Foot = { hints: ['ctrl+x tab 操作'], stop: run.status === 'running' ? '停止' : null, canBack: true, back: '返回列表' }
-      const width = Math.min(columns, Math.max(24, ...lines.map(l => cells(l.text)), cells(`${run.name}  ${withNote(runSubtext(run))}`) + 3, footerCells(foot) + 2))
-      return shell(BLUE, width, { name: run.name, color: BLUE, sub: withNote(runSubtext(run)) }, <Box flexDirection="column">{lines.map(draw)}</Box>, lines.length, foot)
+      return shell(BLUE, columns, { name: run.name, color: BLUE, sub: withNote(runSubtext(run)) }, <Box flexDirection="column">{lines.map(draw)}</Box>, lines.length, foot)
     }
 
     // 一个 flow：两栏，左栏阶段，右栏 agent 或 agent 详情，照 Workflow 详情面板的样子；名称紫色
@@ -1197,7 +1201,7 @@ export const register: Register = on => {
     const agents = tasksOf(run, phase)
     const level = at.level
     const task = level === 'agent' ? agents.find(t => t.label === at.label) : undefined
-    // 宽度按整个 flow 的内容算（换阶段时方框不跳），只占需要的宽度
+    // 左栏按内容定宽（阶段栏和详情左栏不同），右栏吃掉剩下的宽度，整块始终占满面板
     // 进度按「总数/总数」预留，完成数进位时不跳
     const countWidth = Math.max(3, ...run.phases.map(p => `${tasksOf(run, p.title).length}/${tasksOf(run, p.title).length}`.length))
     // 阶段一行：选中标记 2 + 序号 + 空格 + 图标 + 空格 + 名称 + 进度 + 耗时（固定预留）
@@ -1207,13 +1211,10 @@ export const register: Register = on => {
       level === 'agent'
         ? Math.min(20, Math.max(16, ...agents.map(t => cells(t.label) + 4)))
         : Math.min(32, Math.max(16, Math.max(4, ...run.phases.map(p => cells(p.title))) + 6 + numWidth + countWidth + timeCell))
-    const available = columns - leftWidth - 7
     const labelWidth = Math.min(16, Math.max(4, ...run.tasks.map(t => cells(t.label))))
+    // 两栏之间 3 格，有内框时左右再各 2 格
+    const rightWidth = Math.max(8, columns - leftWidth - (framed ? 7 : 3))
     // agent 一行：选中标记 2 + 图标 1 + 空格 1 + 名称 labelWidth+1 + 模型 effort + token（固定预留）+ 耗时（固定预留）
-    const modelWidth = Math.max(4, ...run.tasks.map(t => cells(`${shortModel(t.model)} ${t.effort}`)))
-    const titleWidth = Math.max(...run.phases.map(p => cells(`${p.title} · ${tasksOf(run, p.title).length} 个 agent`) + 3))
-    const listWidth = Math.max(titleWidth, 4 + labelWidth + 1 + modelWidth + TOKEN_SLOT + TIME_SLOT)
-    let rightWidth = Math.min(available, listWidth)
     // 模型栏吃掉多余宽度，token 和时长栏始终贴右
     const modelCell = Math.max(1, rightWidth - 5 - labelWidth - TOKEN_SLOT - TIME_SLOT)
 
@@ -1338,9 +1339,7 @@ export const register: Register = on => {
       const time = task.reused ? '复用上次结果' : agentTime(task)
       const state = task.checking ? '验收中' : !task.reused && (task.status === 'running' || task.status === 'completed') ? WORD[task.status] : ''
       const stats = [agentStats(task), time, state].filter(Boolean).join(' · ')
-      const lines: Line[] = [{ text: stats, dim: true }, ...card(task, available)]
-      // 详情按可用宽度折行，再收到最长一行的宽度；有插话框时至少留出能输入的宽度
-      rightWidth = Math.min(available, Math.max(listWidth, cells(rightTitle) + 3, ...lines.map(l => cells(l.text)), steer ? 40 : 0))
+      const lines: Line[] = [{ text: stats, dim: true }, ...card(task, rightWidth)]
       rightCells = clip(lines, bodyRows - (steer ? 1 : 0)).map(draw)
       if (steer && Input) {
         rightCells.push(
@@ -1394,7 +1393,8 @@ export const register: Register = on => {
     }
 
     // 两栏各是一列：光标按树序先走完左栏再到右栏，不会在两栏之间来回跳
-    const height = Math.max(leftCells.length, rightCells.length)
+    // 两栏补到可用高度，内框和外框一样固定大小
+    const height = Math.max(leftCells.length, rightCells.length, bodyRows)
     const fill = (items: RenderElement[]) => [...items, ...Array.from({ length: height - items.length }, () => <Text> </Text>)]
     const bar = (text: string) => <Box flexDirection="column">{Array.from({ length: height }, () => <Text dimColor>{text}</Text>)}</Box>
     const body = (
@@ -1427,9 +1427,6 @@ export const register: Register = on => {
       sub: [WORD[run.status] ?? run.status, othersNote, parallel > 1 ? `${parallel} 个阶段并行` : ''].filter(Boolean).join(' · '),
       right: [totalTokens ? `${formatTokens(totalTokens)} tok` : '', formatDuration(run.seconds)].filter(Boolean).join(' · '),
     }
-    // 标题按最长的状态和数字预留（9 个阶段并行、999.9k tok、99h59m），数字增长时方框不跳
-    const headCells = cells(run.name) + cells(`  ${WORD.running} · 9 个阶段并行`) + (othersNote ? cells(` · ${othersNote}`) : 0) + cells(' 999.9k tok · 99h59m ') + 3
-    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, headCells, footerCells(foot) + 2))
     // 只剩一行内容时（输入框草稿或任务清单占了高度），两栏只放得下一个阶段和一个 agent，看起来像只有一个任务。
     // 改画一行摘要：当前阶段的进度和它的全部 agent，放不下的写「+N」；没有标题行时 flow 名称放在最前
     if (rows <= 1) {
@@ -1484,6 +1481,6 @@ export const register: Register = on => {
       const compact: Foot = { hints: [], stop: level === 'phases' ? stop : null, canBack: others > 0, back: '返回列表', toList: true }
       return shell(PURPLE, lineWidth, head, <Box width={lineWidth}>{nodes}</Box>, 1, compact)
     }
-    return shell(PURPLE, flowWidth, head, body, height + (framed ? 2 : 0), foot)
+    return shell(PURPLE, columns, head, body, height + (framed ? 2 : 0), foot)
   })
 }

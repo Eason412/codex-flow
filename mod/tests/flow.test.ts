@@ -677,7 +677,8 @@ for (const maxRows of [24, 10]) {
     const requestId = `agents-${maxRows}`
     const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', requestId, props: { ...(PROPS as object), maxRows } as never })
     await ui.press({ key: 'p:审查' })
-    const size = Math.min(12, maxRows - 6)
+    // 面板固定 16 行（PANEL_ROWS）：外框 2 行、内框 2 行，其余留两行给「还有 N 个」
+    const size = Math.min(12, Math.min(maxRows, 16) - 6)
     expect(await ui.findAll({ type: 'Button', key: undefined, text: /^agent-\d+$/ })).toHaveLength(size)
     expect((await ui.find({ key: 'more:agents:down' }))?.text).toBe(`↓ 还有 ${20 - size} 个`)
     expect(await ui.find({ key: `t:r-1:agent-${size}` })).toBeUndefined()
@@ -718,7 +719,7 @@ test('阶段栏时右栏的 agent 也可选：窗口跟着运行项，「还有�
   await clock.advance(2_000)
   const requestId = 'passive-agents'
   const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', requestId, props: PROPS })
-  expect(await ui.findAll({ type: 'Button', text: /^agent-\d+$/ })).toHaveLength(12)
+  expect(await ui.findAll({ type: 'Button', text: /^agent-\d+$/ })).toHaveLength(10)
   expect(await ui.find({ type: 'Button', text: /^agent-18$/ })).toBeDefined()
   expect((await ui.findAll({ type: 'Button', text: /还有 \d+ 个/ })).map(b => b.key)).toEqual(['more:agents:up', 'more:agents:down'])
   expect(w.windowStarts.agents).toBe(7)
@@ -1088,6 +1089,33 @@ test('看一个任务时标题写「另有 N 个任务」，返回键写「返�
   await ui.press({ key: 'r:r-1' })
   await ui.press({ key: 'p:审查' })
   expect((await ui.find({ type: 'Button', key: 'back' }))?.props.label).toBe('返回')
+  await ui.unmount()
+})
+
+test('面板大小固定：列表、flow 阶段栏、agent 栏和 agent 详情行数和宽度都一样，放不下 16 行时按可用行数', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  world(on)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  const size = async () => { const root = await ui.drawn(); return [drawnRows(root), 'props' in root ? (root.props as { width?: number }).width : undefined] }
+  // 列表（一个 flow、一个单发）→ flow 阶段栏 → agent 栏 → agent 详情 → 返回列表 → 单发详情
+  const seen = [await size()]
+  await ui.press({ key: 'r:r-1' })
+  seen.push(await size())
+  await ui.press({ key: 'p:审查' })
+  seen.push(await size())
+  await ui.press({ key: 't:r-1:性能' })
+  seen.push(await size())
+  for (let i = 0; i < 3; i++) await ui.press({ key: 'back' })
+  await ui.press({ key: 'r:s-1' })
+  seen.push(await size())
+  expect(seen).toEqual(Array.from({ length: seen.length }, () => [16, 96]))
+  // 草稿变长只剩 10 行时，各层同样占满 10 行
+  await ui.redraw({ ...(PROPS as object), maxRows: 10 } as never)
+  expect(drawnRows(await ui.drawn())).toBe(10)
+  await ui.press({ key: 'back' })
+  expect(drawnRows(await ui.drawn())).toBe(10)
   await ui.unmount()
 })
 
