@@ -142,3 +142,16 @@ test('--rerun=任务名 的写法同样生效；多余的位置参数和不认�
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /不认识的参数: --rerum/);
 });
+
+test('工作区快照：提交后马上改成同样大小的内容也能认出来；不改仓库自己的 index', async () => {
+  const { contentTree, changedBetween, gitRoot } = await import('../lib/workspace.mjs');
+  for (let round = 0; round < 5; round++) {
+    const { repo, git } = gitRepo(`racy${round}`, { 'a.md': '一\n' });
+    const top = gitRoot(repo);
+    const before = contentTree(top);
+    fs.writeFileSync(path.join(repo, 'a.md'), '二\n');
+    const after = contentTree(top);
+    assert.deepEqual(changedBetween(top, before, after), [path.join(top, 'a.md')], `第 ${round + 1} 次`);
+    assert.equal(git('diff', '--cached', '--name-only'), '');
+  }
+});

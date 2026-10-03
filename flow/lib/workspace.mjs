@@ -15,7 +15,7 @@ export function gitRoot(cwd) {
 }
 
 // 用临时 index 记下工作区内容，不碰仓库自己的 index。先复制原 index，沿用其中的文件状态缓存，未改的文件不用重新读。
-// 副本保留原 index 的修改时间：git 靠它识别和 index 同一时刻写过的文件、重新读内容；时间变新会让同一秒内改过且大小不变的文件被当成没改
+// 副本保留原 index 的修改时间：git 按 index 的时间判断哪些文件可能和 index 同一时刻写过、要重新读内容，复制不改变这个口径
 export function contentTree(root) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-flow-index-"));
   const index = path.join(tmp, "index");
