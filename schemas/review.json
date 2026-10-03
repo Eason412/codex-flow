@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "findings", "open_questions"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "pass_with_issues", "fail"]},
+    "summary": {"type": "string"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "file", "line", "issue", "evidence", "suggestion"],
+        "properties": {
+          "severity": {"type": "string", "enum": ["critical", "major", "minor"]},
+          "file": {"type": "string"},
+          "line": {"type": ["integer", "null"]},
+          "issue": {"type": "string"},
+          "evidence": {"type": "string"},
+          "suggestion": {"type": "string"}
+        }
+      }
+    },
+    "open_questions": {"type": "array", "items": {"type": "string"}}
+  }
+}

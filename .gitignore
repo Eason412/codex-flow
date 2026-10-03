@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+*.log
+# Claude Code 每次加载 mod 时生成的类型声明，含本机连接的 MCP 工具
+mod/.claude-plugin/types/

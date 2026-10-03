@@ -1,0 +1,82 @@
+---
+name: codex
+description: "把边界清楚、能独立完成的子任务交给 Codex CLI 执行，每次指定模型和 effort，并报告 Codex 实际使用的值；难题时找 Astra 讨论，高难度任务收尾时让 Codex 审查。用户说“交给 Codex”时也用。"
+---
+
+# 调用
+
+```bash
+~/.claude/skills/codex/run.sh -m <模型> -e <effort> [-C <目录>] [-r <thread_id> | -f <thread_id> | -w] [-j <schema>] "<任务>"
+```
+
+- `-r` 接着同一个 Codex 对话继续；`-f` 从某个对话分叉出新对话，试另一个方向而不打乱原对话。
+- `-w` 在新的 git worktree 里运行，并行改文件时用；这种任务之后不能 `-r` 或 `-f`。
+- `-j` 让 Codex 按固定 JSON 返回：`review`（审查）、`opinion`（讨论意见）、`result`（实现结果），也可以给 schema 文件路径。审查和讨论一律加 `-j`。
+- 输出第一行是日志目录；结尾的「实际使用」一行来自 Codex 自己的会话记录（只认这次运行期间的记录），不是回显请求参数。出现 ⚠ 表示无法核实，要告诉用户。运行中的 token 用量每 2 秒从 Codex 会话记录更新到面板；续接（`-r`）和分叉（`-f`）只算这一次的用量。
+- Codex 以完全权限运行（无沙箱、不审批），会直接改文件、跑命令。不要加 `--ephemeral`，否则没有会话记录可核实。
+
+# 默认分工（每次都显式指定模型和 effort）
+
+允许的模型和 effort 写在本目录的 `models.json`（现在是 `gpt-6.1-sol` 和 `gpt-6-astra`），run.sh 和 codex-flow 都按它检查，名单外直接拒绝；以后增减模型只改这个文件。用户指定了模型或 effort 时以用户为准；否则按下表选：
+
+| 任务 | 模型 / effort |
+|---|---|
+| 常规任务：查找、批量修改、补测试、跑命令收集信息、边界清楚的小功能、原因明确的 bug 修复、代码审查 | `gpt-6.1-sol` / `high` |
+| 难题：架构和方案取舍、自己试过仍没解决的 bug、较大改动的第二意见 | 和 `gpt-6-astra` 讨论，`medium` 起步，特别难用 `high` |
+| 很高难度的任务做完后，审查一次改动 | `gpt-6-astra` / `high`，加 `-j review` |
+
+平时不做自动审查，只有很高难度的任务在收尾时审查一次。
+
+# 和 Astra 讨论（独立判断）
+
+1. 先在自己心里定下倾向，但不要告诉 Astra。只给它背景、证据、约束、已尝试的办法和卡点，写明「只分析、不要修改文件」，加 `-j opinion`。
+2. 它的判断和我不同时，用 `-r` 反驳一轮：说出我的方案和理由，请它指出哪里站不住。只来回这一轮。
+3. 想试另一个方向时用 `-f` 分叉，不要在原对话里反复改前提。
+4. 最后由 Claude 决定方案并实施，向用户说明采纳或不采纳 Astra 意见的原因。
+
+# 前台还是后台
+
+- 需要审查结论的任务（Astra 讨论、代码审查、难题排查）由主 agent 自己运行并读完整输出，不交给后台子代理转述。
+- 常规的 Sol 任务想放后台时，交给 `codex-runner` 子代理（Sonnet）去跑，它只带回实际模型/effort、结果要点和完整输出路径；需要细看时再读完整输出。
+- 前台运行时 Bash 的 timeout 设为 600000。预计超过 10 分钟的任务用 `run_in_background`，跑满 15 分钟时按下面「跑满 15 分钟时排查」处理。
+- run.sh 加 `-n <显示名>` 时，状态行和 `/flow` 面板用这个简短中文名；不加时取任务描述的开头。
+
+# 多个任务一起跑：codex-flow
+
+有两个以上要并行或分阶段的 Codex 任务时，写一个计划文件放在 scratchpad，用 `run_in_background` 交给 codex-flow，不再逐个调 run.sh：
+
+```bash
+node ~/.claude/skills/codex/flow/codex-flow.mjs run <plan.json>
+```
+
+```json
+{"name": "review-api", "cwd": "/path/to/repo",
+ "phases": [
+   {"title": "审查", "tasks": [
+     {"label": "安全", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "prompt": "…"},
+     {"label": "性能", "model": "gpt-6.1-sol", "effort": "high", "prompt": "…"}]},
+   {"title": "复核", "tasks": [
+     {"label": "汇总复核", "model": "gpt-6-astra", "effort": "high", "prompt": "复核下面的审查结果：\n{{phase:审查}}"}]}]}
+```
+
+- 阶段按顺序跑，同一阶段的任务并行，数量不设上限，按任务需要定。某个阶段全部失败时，后面的阶段跳过。
+- `{{phase:标题}}` 换成该阶段所有任务的结果，`{{task:名字}}` 换成单个任务的结果；没完成的任务换成一行说明。
+- `label` 在整个计划里唯一，会显示给用户，用简短中文名；`brief` 可选，是 `/flow` 详情页里的一句话说明；`schema` 用内置的 `review` / `opinion` / `result` 或 schema 文件路径。模型和 effort 照上面的分工表，只能用 `models.json` 里的。
+- 结束时会收到后台任务通知。读输出里的汇总（也在运行目录的 `summary.txt`），再按结果路径读要细看的结果；汇总里出现「⚠ 实际模型」要告诉用户。
+- 停整个 flow：用户在 Background 里按 x，或我用 TaskStop。停单个任务：用户在 `/flow` 面板按 x，或 `codex-flow.mjs cancel <runId> <label>`。中途补充要求：`codex-flow.mjs steer <runId> <label> "<内容>"`。看进度：`codex-flow.mjs status [runId]`。
+- 续跑：`codex-flow.mjs run <改过的 plan.json> --resume <runId>`，或不给计划只写 `run --resume <runId>`。没改过且已完成的任务复用结果，改过的任务和它后面阶段的任务重跑。
+- 显示部分：输入框上方的任务面板和提醒是 `mod/` 下的 mod，由 `~/.claude/settings.json` 的 `CLAUDE_CODE_PLUGIN_DIRS` 加载到每个会话（之前已开着的会话要重开才加载）。flow 和 run.sh 单个任务开始时面板自动出现（flow 紫色、agent 蓝色）；有任务在跑时面板不能关闭，全部结束后可按 q 关闭，否则自动打开的面板在 30 秒后收起；关闭后同一批任务不再弹出。`/flow` 只负责打开，面板已自动打开时输 `/flow` 会转为手动打开，结束后不自动收起。面板右上角的 `[-]` 是 Claude Code 自带的折叠，折叠后只剩一行「▸ plugin panel hidden」，插件解除不了，用户点那一行或按 ctrl+x ctrl+a 展开。任务很多时各列只显示一段窗口，用「还有 N 个」翻动。面板显示时状态行（`flow/statusline.mjs`，ccstatusline 调用）不画 codex 那一行，靠 mod 写的 `~/.claude/codex-flow/panel-<会话>.json` 判断。改 mod 后跑 `claude plugin validate` 和 `claude plugin test`；改执行器后跑 `node --test flow/tests/`。
+
+# 跑满 15 分钟时排查
+
+- 任何 Codex 任务（flow 里的或 run.sh 单发的）跑满 15 分钟，codex-flow mod 会在对话里发一条 `[codex-flow]` 提醒，之后每满 15 分钟再提醒一次。收到后读提醒里给的日志，看它最近在做什么、有没有进展，向用户汇报。不自动停止，停不停由用户决定。
+- 没加载 mod 时（没有 `/flow` 命令），flow 启动后另开一个后台 Bash 跑 `codex-flow.mjs watch <runId>`：有任务跑满 15 分钟时它输出提醒并退出，我收到通知后照上一条处理。
+- 只凭时长，或日志一段时间没有新内容，不能说任务“卡住”。要有具体证据（反复出现同一个错误、在等交互请求、进程已经退出）才下结论，并把证据告诉用户。
+
+# 委派规则
+
+- 开跑前告诉用户：交给 Codex 做什么、用哪个模型和 effort。结束后报告「实际使用」的模型和 effort，以及结果要点。
+- 任务描述要自包含，Codex 看不到本次对话：写清目标、相关文件路径、约束、验收标准，以及要它返回什么。
+- 同一时间不要和 Codex 改同一批文件。并行的改文件任务各用 `-w`。它改完后用 `git diff` 看一遍再向用户汇报；worktree 任务到输出里的「工作目录」看 diff，确认后再合并。
+- 不交给 Codex：一两步就能做完的小事、依赖本次对话上下文或需要用户拍板的事、删除或强推等不可逆操作。
+- 自动委派走本脚本；插件的 `/codex:review`、`/codex:rescue` 等留给用户手动使用。
