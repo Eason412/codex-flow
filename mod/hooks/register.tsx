@@ -168,6 +168,7 @@ function toRun(dir: string, state: any, now: number, alive: Set<number>): FlowRu
           : null,
         // 执行器在验收中被杀时 checking 会留下；只在任务仍运行时算数
         checking: t.checking === true && t.status === 'running' && status !== 'lost',
+        turnEnded: t.turnEnded === true,
       }),
     ),
   }
@@ -355,6 +356,7 @@ async function changePanel($: Engine, decide: () => Promise<boolean>) {
 
 // 只在 panelChanges 内调用；完整记下这次 shown/auto 的来源。
 async function applyShown($: Engine, value: boolean, by: PanelRecord['by'], isAuto = false) {
+  if (!value) ringAt = null
   await update($, shown, () => value)
   await update($, auto, () => value && isAuto)
   latestPanel = { shown: value, auto: value && isAuto, by }
@@ -751,7 +753,7 @@ async function pressHide($: Engine) {
 }
 
 // 插话只给运行中、不在验收的 flow 任务：单个 agent 由 run.sh 跑，收不到插话；验收时 Codex 已经结束
-const canSteer = (run: FlowRun, task: FlowTask | undefined) => run.kind === 'flow' && task?.status === 'running' && !task.checking
+const canSteer = (run: FlowRun, task: FlowTask | undefined) => run.kind === 'flow' && task?.status === 'running' && !task.checking && !task.turnEnded
 const steerKey = (runId: string, label: string, round: number) => `steer:${runId}:${label}:${round}`
 
 // 写进控制目录，执行器每秒取走、用 turn/steer 发给这个 Codex；送达或被拒都会出现在详情的「过程」里
@@ -764,7 +766,12 @@ async function sendSteer($: Engine, runId: string, label: string, value: string)
     $.ui.toast(`「${label}」已不在运行，插话没有发出`)
     return
   }
-  await $.fs.write(`${run.dir}/control/${fileSafe(label)}.steer.${await $.clock.now()}.txt`, text)
+  try {
+    await $.fs.write(`${run.dir}/control/${fileSafe(label)}.steer.${await $.clock.now()}.txt`, text)
+  } catch (error) {
+    $.ui.toast(`插话没有写入：${String(error)}`)
+    return
+  }
   await update($, steerRound, n => n + 1)
   $.ui.toast('已交给执行器，送达后出现在「过程」里')
   await focusOn($, steerKey(runId, label, await read($, steerRound)))
@@ -1088,7 +1095,8 @@ export const register: Register = on => {
         for (const step of t.recent.slice(live ? -8 : -3)) {
           const [icon, color] = STEP[step.kind] ?? ['·', undefined]
           const tone = step.status === 'running' ? BLUE : step.status === 'failed' ? RED : color
-          lines.push({ text: `${icon} ${step.kind === 'steer' ? '插话：' : ''}${step.text}`, color: tone, dim: !tone })
+          // 每步一行：旧记录或别的写入者可能带换行
+          lines.push({ text: `${icon} ${step.kind === 'steer' ? '插话：' : ''}${step.text.replace(/\s+/g, ' ')}`, color: tone, dim: !tone })
         }
       }
       lines.push({ text: '' })
@@ -1180,6 +1188,8 @@ export const register: Register = on => {
       ? windowed(agents, 'detailAgents', t => detailKey(run.runId, t.label), hot && agents.some(t => detailKey(run.runId, t.label) === hot) ? hot : at.label ? detailKey(run.runId, at.label) : null)
       : windowed(run.phases, 'phases', p => phaseKey(p.title), hot && run.phases.some(p => phaseKey(p.title) === hot) ? hot : phase ? phaseKey(phase) : null)
     const steer = !!Input && !!task && canSteer(run, task)
+    // 插话框不在了（任务结束、进入验收、换了 agent）就忘掉光标在它上面，免得下一次 ↑ 被误改道
+    if (!steer && ringAt?.startsWith('steer:')) ringAt = null
     const leftCells = withMore(
       level === 'agent'
         ? (leftWin.items as FlowTask[]).map(t => {

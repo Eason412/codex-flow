@@ -19,6 +19,8 @@ export type FlowTask = {
   activity: { commands: number; edits: number; messages: number } | null
   // 运行中且正在跑验收命令：Codex 已结束，插话送不到
   checking: boolean
+  // 这一轮 Codex 已结束（之后可能还在验收）：插话不会再被取走
+  turnEnded: boolean
 }
 
 export type FlowRun = {

@@ -50,7 +50,7 @@ const PANEL = '/home/me/.claude/codex-flow/panel-sess-1.json'
 const PROPS = { hasSurvey: false, isWorking: false, maxRows: 24, bodyColumns: 100, scroll: { top: 0, bodyRows: 24, contentRows: 0 }, view: {} } as never
 const FLOW_CMD = { command: 'flow', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as const
 
-type World = { writes: string[]; prompts: string[]; toasts: string[]; logs: { text: string; to: string }[]; killed: string[][]; alive: number[]; files: Record<string, string>; mtimes: Record<string, number>; dirs: string[]; failList: boolean; rootExists: boolean; failReads: string[]; windowStarts: WindowStarts; focuses: string[]; beforeManualAutoSet?: () => Promise<void>; beforePanelWrite?: (text: string) => Promise<void> }
+type World = { writes: string[]; prompts: string[]; toasts: string[]; logs: { text: string; to: string }[]; killed: string[][]; alive: number[]; files: Record<string, string>; mtimes: Record<string, number>; dirs: string[]; failList: boolean; rootExists: boolean; failReads: string[]; windowStarts: WindowStarts; focuses: string[]; failWrites?: RegExp; beforeManualAutoSet?: () => Promise<void>; beforePanelWrite?: (text: string) => Promise<void> }
 
 function world(on: On): World {
   const w: World = {
@@ -123,6 +123,7 @@ function world(on: On): World {
     return { value: text }
   })
   on('fs.write', async ($, e) => {
+    if (w.failWrites?.test(e.path)) throw new Error('EACCES')
     w.writes.push(e.path)
     if (e.path === PANEL) await w.beforePanelWrite?.(e.text)
     w.files[e.path] = e.text
@@ -1153,6 +1154,7 @@ test('agent 详情显示过程和累计数；运行中的 flow 任务有插话�
     { id: 'c2', kind: 'cmd', text: 'npm test', status: 'running' },
     { kind: 'steer', text: '先看 a.ts' },
     { kind: 'note', text: '插话没有送达：turn 已结束' },
+    { kind: 'msg', text: '第一行\n第二行' },
   ]
   const state = { ...flowState, tasks: flowState.tasks.map(t => (t.label === '性能' ? { ...t, recent, activity: { commands: 7, edits: 2, messages: 3 } } : t)) }
   w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(state)
@@ -1170,6 +1172,8 @@ test('agent 详情显示过程和累计数；运行中的 flow 任务有插话�
   expect((await ui.find({ type: 'Text', text: '$ npm test' }))?.props.color).toBe('#7AA2F7')
   expect((await ui.find({ type: 'Text', text: '↪ 插话：先看 a.ts' }))?.props.color).toBe('#7DCFFF')
   expect((await ui.find({ type: 'Text', text: '! 插话没有送达：turn 已结束' }))?.props.color).toBe('#E0AF68')
+  // 带换行的步骤压成一行，不撑破行数
+  expect(await ui.find({ type: 'Text', text: '› 第一行 第二行' })).toBeDefined()
   expect(await ui.find({ type: 'Input', key: 'steer:r-1:性能:0' })).toBeDefined()
   // Enter 发送：去掉首尾空白写进控制目录，换一个空的新框；只有空白时不发
   await ui.input({ key: 'steer:r-1:性能:0', text: '  也看看缓存  ' })
@@ -1180,6 +1184,16 @@ test('agent 详情显示过程和累计数；运行中的 flow 任务有插话�
   expect(await ui.find({ type: 'Input', key: 'steer:r-1:性能:1' })).toBeDefined()
   await ui.input({ key: 'steer:r-1:性能:1', text: '   ' })
   expect(controlWrites(w).at(-1)).toBe(sent)
+  // 写不进控制目录时提示，输入框不换新
+  w.failWrites = /\.steer\./
+  await ui.input({ key: 'steer:r-1:性能:1', text: '写不进去' })
+  w.failWrites = undefined
+  expect(w.toasts.at(-1)).toContain('插话没有写入')
+  expect(await ui.find({ type: 'Input', key: 'steer:r-1:性能:1' })).toBeDefined()
+  // Codex 已结束（还没进入验收）时不再给插话框
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...state, tasks: state.tasks.map(t => (t.label === '性能' ? { ...t, turnEnded: true } : t)) })
+  await clock.advance(2_000)
+  expect(await ui.find({ type: 'Input' })).toBeUndefined()
   // 已完成的 agent 没有插话框
   await ui.press({ key: 'a:r-1:安全' })
   expect(await ui.find({ type: 'Input' })).toBeUndefined()
