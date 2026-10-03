@@ -6,6 +6,7 @@ import path from "node:path";
 import { checkModelEffort, readJson } from "./state.mjs";
 import { die, here } from "./runtime.mjs";
 import { estimate } from "./meter.mjs";
+import { isolationBlocker } from "./isolation.mjs";
 
 const SCHEMAS = path.resolve(here, "..", "schemas");
 
@@ -65,6 +66,7 @@ export function loadPlan(planFile) {
 export function validatePlan(plan) {
   if (!plan || typeof plan.name !== "string" || !plan.name.trim()) die("计划缺少 name");
   if (!Array.isArray(plan.phases) || plan.phases.length === 0) die("计划缺少 phases");
+  if (plan.isolation !== undefined && plan.isolation !== "worktree") die('计划的 isolation 只能写 "worktree"');
   const labels = new Set();
   const titles = new Set();
   for (const phase of plan.phases) {
@@ -86,9 +88,20 @@ export function validatePlan(plan) {
           die(`任务「${task.label}」的 ${key} 要写成字符串数组`);
         }
       }
+      checkIsolation(plan, task);
     }
   }
   return dependencies(plan);
+}
+
+// 计划顶层的 isolation 作为任务默认值展开到任务上；非 git 目录、有已初始化子模块的仓库拒绝启动
+function checkIsolation(plan, task) {
+  if (task.isolation === undefined && plan.isolation !== undefined) task.isolation = plan.isolation;
+  if (task.isolation === undefined) return;
+  if (task.isolation !== "worktree") die(`任务「${task.label}」的 isolation 只能写 "worktree"`);
+  if (task.keepWorktree !== undefined && typeof task.keepWorktree !== "boolean") die(`任务「${task.label}」的 keepWorktree 要写成 true 或 false`);
+  const blocker = isolationBlocker(task.cwd ?? plan.cwd);
+  if (blocker) die(`任务「${task.label}」写了 isolation，但${blocker}`);
 }
 
 // 每个任务等哪些任务：没写 after 就等上一阶段全部任务（阶段间顺序执行）；写了 after 就只等列出的任务或阶段，前置完成即开跑。
@@ -168,6 +181,9 @@ export function withContract(prompt, task) {
   }
   if (task.checks?.length) {
     lines.push("你结束后执行器会在工作目录依次运行下面的验收命令，全部退出码为 0 才算完成：", ...task.checks.map((c) => `- ${c}`));
+  }
+  if (task.isolation === "worktree") {
+    lines.push("工作目录是执行器为本任务建的独立 git worktree，结束且验收通过后执行器把整份改动合回主工作区（有超出写入范围的改动就整份不合回）；不要 commit、stash 或切换分支。node_modules、.venv、venv 是指回主工作区的链接，写进去会落到主工作区；其余被忽略的文件不在这里。");
   }
   return lines.length ? `${prompt}\n\n---\ncodex-flow 约束：\n${lines.join("\n")}` : prompt;
 }

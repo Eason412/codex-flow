@@ -16,12 +16,13 @@ function note(state, task, other, files) {
 // 任务结束时调用，返回需要重新验收的任务：已经先结束、完成了、有验收命令的碰撞对象
 export function recordCollisions(state, task) {
   const mine = touchedBy.get(task.label);
-  if (!mine?.size || task.worktree || !task.startedAt) return [];
+  // 隔离任务的组合由三方合回和合回后再验收负责，不在这里算
+  if (!mine?.size || task.isolation === "worktree" || !task.startedAt) return [];
   const start = Date.parse(task.startedAt);
   const end = task.endedAt ? Date.parse(task.endedAt) : Date.now();
   const recheck = [];
   for (const other of state.tasks) {
-    if (other === task || other.worktree || !other.startedAt) continue;
+    if (other === task || other.isolation === "worktree" || !other.startedAt) continue;
     const otherEnd = other.endedAt ? Date.parse(other.endedAt) : Infinity;
     if (Date.parse(other.startedAt) > end || otherEnd < start) continue;
     const theirs = touchedBy.get(other.label);

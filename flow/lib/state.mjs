@@ -133,10 +133,18 @@ export function briefOf(text, limit = 80) {
 export const promptHash = (task) =>
   crypto.createHash("sha256").update(JSON.stringify([task.prompt, task.model, task.effort, task.schema ?? null])).digest("hex").slice(0, 16);
 
-// 删掉 7 天前结束的记录、开始超过 7 天且进程已不在的记录，以及超过 7 天未登记的目录
-export function pruneOldRuns(days = 7) {
+const ARCHIVE_DAYS = 30; // 含隔离任务没合回的成果（私有引用）的运行记录保留更久
+
+// 运行记录里还有隔离任务没合回的成果（私有引用）或保留的 worktree
+export const hasArchive = (state) =>
+  (state?.tasks ?? []).some((t) => t.isolation === "worktree" && (t.worktree || (t.merge?.result && t.merge.state !== "applied")));
+
+// 删掉 7 天前结束的记录、开始超过 7 天且进程已不在的记录，以及超过 7 天未登记的目录。
+// 含没合回成果的记录保留 30 天，到期由 cleanArchive 先删它的私有引用和残留 worktree 再删目录；没给 cleanArchive 的调用方跳过这类记录
+export function pruneOldRuns(days = 7, cleanArchive = null) {
   const cutoff = Date.now() - days * 86400000;
-  const expired = (state) => !isAlive(state.pid) && Date.parse(state.endedAt || state.startedAt) < cutoff;
+  const keepDays = (state) => (hasArchive(state) ? Math.max(days, ARCHIVE_DAYS) : days);
+  const expired = (state) => !isAlive(state.pid) && Date.parse(state.endedAt || state.startedAt) < Date.now() - keepDays(state) * 86400000;
   for (const entry of fs.existsSync(RUNS) ? fs.readdirSync(RUNS, { withFileTypes: true }) : []) {
     if (!entry.isDirectory()) continue;
     const dir = path.join(RUNS, entry.name);
@@ -147,6 +155,10 @@ export function pruneOldRuns(days = 7) {
       // 续跑可能在取得候选记录后更新状态；删除前重读并重新检查 PID 和时间。
       const latest = readJson(file);
       if (!latest || JSON.stringify(latest) !== JSON.stringify(state) || !expired(latest)) continue;
+      if (hasArchive(latest)) {
+        if (!cleanArchive) continue;
+        cleanArchive(latest);
+      }
     } else {
       // 只清理没有 state.json 的旧目录；损坏或暂时读不到的状态文件不算未登记。
       try {

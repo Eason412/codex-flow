@@ -12,6 +12,7 @@ import { changedSources, changesSince, flowCwds, snapshotWorkspace, staleFiles }
 import { measureInput, meterReport } from "./meter.mjs";
 import { recordCollisions } from "./collisions.mjs";
 import { runTask } from "./task.mjs";
+import { cleanRunArchives, interruptedMerge, isolationFields } from "./isolation.mjs";
 import { overallStatus, phaseStatus, renderSummary } from "./summary.mjs";
 
 let stopping = false;
@@ -147,7 +148,12 @@ function populateFlowTasks(dir, state, previous, planTasks, deps, rerun, notes) 
   const tierOf = (model) => (serviceTierOf(model) ? { serviceTier: serviceTierOf(model) } : {});
   for (const [label, t] of planTasks) {
     const old = previous?.tasks?.find((o) => o.label === label);
-    const contract = { writes: t.writes, checks: t.checks, ...(t.reads ? { reads: t.reads } : {}) };
+    // 上次合回写主工作区时中断的隔离任务：不复用、不重跑，记为失败等人工核对
+    if (old?.merge?.state === "applying") {
+      state.tasks.push(interruptedMerge(old, t.phase));
+      continue;
+    }
+    const contract = { writes: t.writes, checks: t.checks, ...(t.reads ? { reads: t.reads } : {}), ...isolationFields(t) };
     const staleRerun = old?.status === "completed" && readOnly(t) && staleFor(label).length ? { staleRerun: staleFor(label) } : {};
     state.tasks.push(canReuse(label)
       ? reuse(old, t)
@@ -265,8 +271,8 @@ function scheduleTasks(dir, state, planTasks, deps) {
 export async function runFlow(planFile, resumeId, rerun = []) {
   const { dir, plan, previous, deps, notes } = prepareFlow(planFile, resumeId, rerun);
   const state = createFlowState(dir, plan);
-  // 计划顶层的 isolation 是各任务的默认值
-  const planTasks = new Map(plan.phases.flatMap((p) => p.tasks.map((t) => [t.label, { ...t, phase: p.title, ...(t.isolation ?? plan.isolation ? { isolation: t.isolation ?? plan.isolation } : {}) }])));
+  // 计划顶层的 isolation 已由 validatePlan 填进各任务
+  const planTasks = new Map(plan.phases.flatMap((p) => p.tasks.map((t) => [t.label, { ...t, phase: p.title }])));
   for (const label of rerun) if (!planTasks.has(label)) die(`--rerun 指向不存在的任务: ${label}`);
   populateFlowTasks(dir, state, previous, planTasks, deps, new Set(rerun), notes);
   if (notes.length) state.notes = notes;
@@ -289,7 +295,7 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   fs.writeFileSync(path.join(dir, "summary.txt"), summary);
   process.stdout.write(summary);
   try {
-    pruneOldRuns();
+    pruneOldRuns(7, cleanRunArchives);
   } catch {
     // 清理失败不影响结果
   }

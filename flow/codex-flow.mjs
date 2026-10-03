@@ -9,6 +9,7 @@
 //   codex-flow.mjs steer <runId> <任务名> "<补充指示>"   给运行中的任务插话
 //   codex-flow.mjs watch <runId> [--alert-after 秒]     有任务跑满时长或 flow 结束时打印一行并退出
 //   codex-flow.mjs stats <runId> [--json]               每个任务的任务说明组成、token 用量、回报大小和验收
+//   codex-flow.mjs clean <runId>                        删掉这次运行的隔离任务留下的私有引用和 worktree
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,7 @@ import { runFlow, onStop } from "./lib/runner.mjs";
 import { cmdStatus, cmdCancel, cmdSteer, cmdWatch } from "./lib/commands.mjs";
 import { cmdStats } from "./lib/stats.mjs";
 import { SINGLE_FLAGS, cmdCheck, cmdSingleStart, cmdSingleWatch, cmdSingleEnd } from "./lib/single.mjs";
+import { cmdClean } from "./lib/isolation.mjs";
 
 export { shortCommand, activityOf } from "./lib/activity.mjs";
 export { inScope } from "./lib/scope.mjs";
@@ -74,11 +76,12 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
     case "steer": cmdSteer(parseArgs(rest)); break;
     case "watch": await cmdWatch(parseArgs(rest, ["alert-after"])); break;
     case "stats": cmdStats(strict(parseArgs(rest), ["json"], 1, "用法: stats <runId> [--json]")); break;
+    case "clean": cmdClean(strict(parseArgs(rest), [], 1, "用法: clean <runId>")); break;
     case "_check": cmdCheck(parseArgs(rest, ["model", "effort", "label"])); break;
     case "_single-watch": await cmdSingleWatch(parseArgs(rest, ["dir"])); break;
     case "_single-start": cmdSingleStart(parseArgs(rest, SINGLE_FLAGS)); break;
     case "_single-end": cmdSingleEnd(parseArgs(rest, [...SINGLE_FLAGS, "code"])); break;
     default:
-      die("用法: run | status | cancel | steer | watch | stats（见文件开头的说明）");
+      die("用法: run | status | cancel | steer | watch | stats | clean（见文件开头的说明）");
   }
 }

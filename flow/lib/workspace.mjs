@@ -14,13 +14,18 @@ export function gitRoot(cwd) {
   return top.status === 0 ? realPath(top.stdout.trim()) : null;
 }
 
-// 用临时 index 记下工作区内容，不碰仓库自己的 index。先复制原 index，沿用其中的文件状态缓存，未改的文件不用重新读
+// 用临时 index 记下工作区内容，不碰仓库自己的 index。先复制原 index，沿用其中的文件状态缓存，未改的文件不用重新读。
+// 副本保留原 index 的修改时间：git 靠它识别和 index 同一时刻写过的文件、重新读内容；时间变新会让同一秒内改过且大小不变的文件被当成没改
 export function contentTree(root) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-flow-index-"));
   const index = path.join(tmp, "index");
   try {
     const own = git(root, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).stdout.trim();
-    if (own && fs.existsSync(own)) fs.copyFileSync(own, index);
+    if (own && fs.existsSync(own)) {
+      fs.copyFileSync(own, index);
+      const { atime, mtime } = fs.statSync(own);
+      fs.utimesSync(index, atime, mtime);
+    }
     const env = { GIT_INDEX_FILE: index };
     if (git(root, ["add", "-A", "--", "."], env).status !== 0) return null;
     const tree = git(root, ["write-tree"], env);

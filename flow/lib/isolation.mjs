@@ -1,0 +1,369 @@
+// 隔离任务（isolation: "worktree"）的生命周期：在 $CODEX_FLOW_HOME/worktrees/<runId>/<任务名> 建 worktree 运行，开始、结束时的快照包成提交
+// 存进私有引用 refs/codex-flow/<runId>/<任务名>/…；验收通过且没有越界、链接异常时与主工作区三方合并，整份成果要么全部合回、要么不合回。
+// 合回成功或没有改动就删 worktree 和引用；失败、冲突、越界、被停止时引用保留成果，worktree 目录默认删掉
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { HOME, isAlive, readJson, runDir, statePath, writeJson } from "./state.mjs";
+import { current, die, save, touchedBy } from "./runtime.mjs";
+import { changedBetween, contentTree, gitRoot } from "./workspace.mjs";
+import { inScope, realPath } from "./scope.mjs";
+import { leaseOf, leases } from "./leases.mjs";
+import { cleanArchives, dropRefs, git, removeWorktree } from "./archive.mjs";
+import { envToMain, materialize, must } from "./worktree.mjs";
+
+const WORKTREES = path.join(HOME, "worktrees");
+// 包快照用固定身份，不依赖仓库的 user 配置
+const IDENTITY = { GIT_AUTHOR_NAME: "codex-flow", GIT_AUTHOR_EMAIL: "codex-flow@localhost", GIT_COMMITTER_NAME: "codex-flow", GIT_COMMITTER_EMAIL: "codex-flow@localhost" };
+const REF_KEYS = ["base", "result", "head", "before", "merged"];
+const PATHS_PER_CALL = 500; // 一次 git 命令最多带的路径数，避开命令行长度上限
+const list = (files) => (files.length > 5 ? `${files.slice(0, 5).join("、")} 等 ${files.length} 个` : files.join("、"));
+// 目录名和引用名共用：只留文字、数字、下划线和连字符，引用名里不合法的字符都换掉
+const nameOf = (label) => label.replace(/[^\p{L}\p{N}_-]+/gu, "_");
+// 任务记为失败并写明原因和类别，返回 false 方便直接 return
+const fail = (task, failureKind, error) => !Object.assign(task, { status: "failed", failureKind, error });
+
+// 运行中的隔离任务：进程退出（含被停止）时补存成果、收尾，再存一次状态
+const active = new Set();
+process.on("exit", () => {
+  if (!active.size) return;
+  for (const iso of [...active]) {
+    try {
+      closeWorktree(iso.task, iso);
+    } catch {
+      // 退出时收尾失败也不影响退出
+    }
+  }
+  save();
+});
+
+// 能否隔离：只支持 git，仓库里有已初始化的子模块时第一版不支持。能隔离返回 null，否则返回原因
+export function isolationBlocker(cwd) {
+  const root = gitRoot(cwd);
+  if (!root) return `${cwd} 不在 git 仓库里：隔离只支持 git。非 git 目录去掉 isolation，靠写入范围排队和改文件碰撞检测保护`;
+  const staged = git(root, ["ls-files", "-s", "-z"]).stdout.split("\0");
+  const modules = staged.filter((e) => e.startsWith("160000 ")).map((e) => e.slice(e.indexOf("\t") + 1));
+  const live = modules.filter((rel) => fs.existsSync(path.join(root, rel, ".git")));
+  return live.length ? `仓库 ${root} 有已初始化的子模块（${list(live)}），隔离暂不支持子模块` : null;
+}
+
+// 计划任务里与隔离有关、要记进运行状态的字段
+export const isolationFields = (t) => (t.isolation ? { isolation: t.isolation, ...(t.keepWorktree ? { keepWorktree: true } : {}) } : {});
+
+// 把树包成提交存进私有引用，核对引用确实指向这棵树；返回 { ref, id }
+function keepTree(iso, key, tree, parents) {
+  const ref = `${iso.prefix}/${key}`;
+  const args = ["commit-tree", "--no-gpg-sign", ...parents.filter(Boolean).flatMap((p) => ["-p", p]), "-m", `codex-flow ${iso.runId} ${iso.task.label} ${key}`, tree];
+  const id = must(git(iso.root, args, { env: IDENTITY }), `保存 ${key} 快照`);
+  must(git(iso.root, ["update-ref", ref, id]), `写 ${key} 引用`);
+  if (git(iso.root, ["rev-parse", "--verify", "-q", `${ref}^{tree}`]).stdout.trim() !== tree) throw new Error(`${key} 引用没有指向预期的快照`);
+  return { ref, id };
+}
+
+function track(iso) {
+  active.add(iso);
+  return iso;
+}
+
+// 建 worktree 写出 tree；失败时删掉建了一半的
+function enter(iso, tree) {
+  try {
+    Object.assign(iso, materialize(iso.root, iso.wtPath, tree, iso.runId, iso.task.label));
+  } catch (error) {
+    removeWorktree(iso.root, iso.wtPath);
+    throw error;
+  }
+  // 任务 cwd 可能是仓库子目录，映射到 worktree 里同一相对位置
+  iso.wtCwd = path.join(iso.wt, path.relative(iso.root, realPath(iso.cwd)));
+  fs.mkdirSync(iso.wtCwd, { recursive: true });
+  iso.task.worktree = { path: iso.wt, repo: iso.root, links: iso.links };
+}
+
+function prepare(dir, task, cwd, root) {
+  const runId = path.basename(dir);
+  const name = nameOf(task.label);
+  return { task, runId, root, cwd, prefix: `refs/codex-flow/${runId}/${name}`, wtPath: path.join(WORKTREES, runId, name), links: [], archived: false };
+}
+
+// 任务开始：主工作区快照 B 存进 base 引用，建 worktree。同一任务续跑重做时，上次留下的 worktree 和引用先删掉
+export function openWorktree(dir, task, cwd) {
+  const root = gitRoot(cwd);
+  if (!root) throw new Error(`${cwd} 不在 git 仓库里，无法隔离`);
+  const iso = prepare(dir, task, cwd, root);
+  removeWorktree(root, iso.wtPath);
+  dropRefs(root, iso.prefix);
+  iso.base = contentTree(root);
+  if (!iso.base) throw new Error("记不下主工作区快照");
+  iso.head = git(root, ["rev-parse", "--verify", "-q", "HEAD"]).stdout.trim();
+  task.merge = { repo: root, base: keepTree(iso, "base", iso.base, [iso.head]) };
+  try {
+    enter(iso, iso.base);
+  } catch (error) {
+    dropRefs(root, iso.prefix);
+    delete task.merge;
+    throw error;
+  }
+  const env = envToMain(root, iso.links);
+  if (env.length) task.envToMain = env;
+  return track(iso);
+}
+
+// 续跑只重跑验收（上次验收没过、成果还没合回）：按 result 引用重建 worktree，验收的是存下的成果。引用不在就报错，不退回主工作区验收
+export function reopenWorktree(dir, task, cwd) {
+  const m = task.merge ?? {};
+  const tree = (key) => (m.repo && m[key] ? git(m.repo, ["rev-parse", "--verify", "-q", `${m[key].ref}^{tree}`]).stdout.trim() : "");
+  const iso = prepare(dir, task, cwd, m.repo);
+  Object.assign(iso, { base: tree("base"), end: tree("result"), archived: true });
+  if (!iso.base || !iso.end) throw new Error(`隔离任务的成果引用已不在，无法只重跑验收；要从头重做加 --rerun ${task.label}`);
+  iso.head = git(iso.root, ["rev-parse", "--verify", "-q", "HEAD"]).stdout.trim();
+  removeWorktree(iso.root, iso.wtPath, task.worktree?.links);
+  enter(iso, iso.end);
+  iso.changed = changedFiles(iso);
+  return track(iso);
+}
+
+function changedFiles(iso) {
+  const changed = changedBetween(iso.root, iso.base, iso.end);
+  if (!changed) throw new Error("比较不了开始和结束时的快照");
+  return changed.map((file) => path.relative(iso.root, file));
+}
+
+// 从快照里去掉受管链接（.gitignore 写成 node_modules/ 时链接不算被忽略，会进快照）：临时 index 读入快照，删掉这些条目再写回
+function stripLinks(iso, tree) {
+  const present = (changedBetween(iso.root, iso.base, tree) ?? []).map((f) => path.relative(iso.root, f)).filter((rel) => iso.links.includes(rel));
+  if (!present.length) return tree;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-flow-index-"));
+  try {
+    const env = { GIT_INDEX_FILE: path.join(tmp, "index") };
+    must(git(iso.wt, ["read-tree", tree], { env }), "读入结束快照");
+    must(git(iso.wt, ["update-index", "--force-remove", "-z", "--stdin"], { env, input: `${present.join("\0")}\0` }), "去掉链接");
+    return must(git(iso.wt, ["write-tree"], { env }), "写结束快照");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// 结束快照 T 存进 result 引用；任务自己做了提交就把它的 HEAD 存为 head。受管链接被换成真实文件或目录、或改指别处，记为异常
+function archiveResult(task, iso) {
+  const raw = contentTree(iso.wt);
+  if (!raw) throw new Error("记不下 worktree 结束时的快照");
+  iso.end = stripLinks(iso, raw);
+  iso.changed = changedFiles(iso);
+  task.merge.result = keepTree(iso, "result", iso.end, [task.merge.base.id]);
+  const head = git(iso.wt, ["rev-parse", "--verify", "-q", "HEAD"]).stdout.trim();
+  if (head && head !== iso.head) {
+    must(git(iso.root, ["update-ref", `${iso.prefix}/head`, head]), "写 head 引用");
+    task.merge.head = { ref: `${iso.prefix}/head`, id: head };
+  }
+  const anomalies = iso.links.filter((rel) => {
+    const file = path.join(iso.wt, rel);
+    const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+    return stat && !(stat.isSymbolicLink() && fs.readlinkSync(file) === path.join(iso.root, rel));
+  });
+  if (anomalies.length) task.merge.anomalies = anomalies;
+  iso.archived = true;
+}
+
+// 相对仓库根的路径换成相对任务 cwd 的显示形式，和 scope.outside 一致
+const shown = (iso, rel) => path.relative(realPath(iso.cwd), path.join(iso.root, rel)) || ".";
+const viewOf = (m) => `查看：git -C ${m.repo} diff ${m.base.ref} ${m.result.ref}；取回成目录：git -C ${m.repo} worktree add --detach <目录> ${m.result.ref}`;
+
+// Codex 正常结束、验收之前：存成果，核对写入范围和受管链接。越界、链接异常或存不下成果时整份不合回、任务失败，不再验收。
+// 返回能否进入验收。验收命令的产物不算任务的改动：结束快照在验收前拍
+export function judgeResult(task, iso) {
+  try {
+    archiveResult(task, iso);
+  } catch (error) {
+    return fail(task, "archive", `存不下隔离任务的成果：${error.message}`);
+  }
+  if (task.writes) {
+    const outside = iso.changed.filter((rel) => !inScope(path.join(iso.root, rel), task.writes, iso.cwd)).map((rel) => shown(iso, rel)).sort();
+    task.scope = outside.length ? { outside, unclaimed: [] } : null;
+    if (outside.length) return fail(task, "outside", `改动超出写入范围：${list(outside)}；整份成果没合回`);
+  }
+  if (task.merge.anomalies) return fail(task, "anomaly", `环境目录链接被任务换掉：${list(task.merge.anomalies)}；整份成果没合回`);
+  return true;
+}
+
+// 任务收尾（合回成功的已在 mergeBack 里删掉）：还没存成果的补存（失败、被中断、被停止），再决定目录去留：
+// 存不下成果、合回中断（applying）或计划写了 keepWorktree 时保留并解锁，否则删掉，成果在引用里（没有改动时引用也删）
+export function closeWorktree(task, iso) {
+  if (!active.delete(iso)) return;
+  if (!iso.archived) {
+    try {
+      archiveResult(task, iso);
+    } catch (error) {
+      task.merge.archiveError = error.message;
+    }
+  }
+  if (!iso.archived || task.merge?.state === "applying" || task.keepWorktree) {
+    git(iso.root, ["worktree", "unlock", iso.wt]);
+    return;
+  }
+  removeWorktree(iso.root, iso.wt, iso.links);
+  delete task.worktree;
+  // 没有改动就没有要保留的成果，引用一并删掉
+  if (!iso.changed?.length) {
+    dropRefs(iso.root, iso.prefix);
+    for (const key of REF_KEYS) delete task.merge[key];
+  }
+}
+
+// 同期改过冲突文件的任务：运行时段与本任务重叠，改文件记录（含合回登记）里有这些文件
+function relatedTasks(task, files) {
+  const start = Date.parse(task.startedAt);
+  return (current?.state.tasks ?? []).filter((t) => t.label !== task.label && t.startedAt && (!t.endedAt || Date.parse(t.endedAt) >= start)
+    && files.some((file) => touchedBy.get(t.label)?.has(file))).map((t) => t.label);
+}
+
+function conflictOf(task, iso, files) {
+  const related = relatedTasks(task, files.map((rel) => path.join(iso.root, rel)));
+  task.merge.conflict = files.map((rel) => shown(iso, rel)).sort();
+  return { kind: "conflict", error: `合回冲突：${list(task.merge.conflict)}${related.length ? `（同期改过：${related.join("、")}）` : ""}；整份成果没合回。`
+    + `${viewOf(task.merge)}；在最新状态上重做：run --resume ${iso.runId} --rerun ${task.label}` };
+}
+
+// 应用后核对：主工作区里 M→R 涉及的文件现在应与 R 一致；返回不一致的文件
+function mismatched(iso, main, result) {
+  const names = (args) => git(iso.root, ["--literal-pathspecs", "diff-tree", "-r", "--name-only", "--no-renames", "-z", ...args]).stdout.split("\0").filter(Boolean);
+  const files = names([main, result]);
+  const now = contentTree(iso.root);
+  if (!now) return files;
+  const off = [];
+  for (let i = 0; i < files.length; i += PATHS_PER_CALL) off.push(...names([now, result, "--", ...files.slice(i, i + PATHS_PER_CALL)]));
+  return off;
+}
+
+// 在租约内：拍主工作区快照 M（before 引用），与 B、T 三方合并得到 R（merged 引用），持久化 applying 后在仓库根把 M→R 的差异用普通 git apply 应用
+// （不带 --index / --3way / --reject，不动主仓库 index），再核对主工作区相关文件等于 R。返回 { result } 或 { kind, error }
+function applyMerge(task, iso) {
+  const main = contentTree(iso.root);
+  if (!main) throw new Error("记不下主工作区快照");
+  const m = task.merge;
+  m.before = keepTree(iso, "before", main, [git(iso.root, ["rev-parse", "--verify", "-q", "HEAD"]).stdout.trim()]);
+  let result = iso.end;
+  if (main !== iso.base) {
+    const merged = git(iso.root, ["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", `--merge-base=${iso.base}`, main, iso.end]);
+    const [tree, ...names] = merged.stdout.split("\0").filter(Boolean);
+    if (merged.status === 1) return conflictOf(task, iso, [...new Set(names)]);
+    if (merged.status !== 0) throw new Error(`三方合并失败：${merged.stderr.trim().split("\n")[0]}`);
+    result = tree;
+  }
+  m.merged = keepTree(iso, "merged", result, [m.before.id, m.result.id]);
+  // diff-tree 不受用户 diff 配置影响；按字节交给 git apply，二进制和非 UTF-8 文本都不走样
+  const patch = git(iso.root, ["diff-tree", "-r", "-p", "--binary", "--full-index", "--no-renames", main, result], { encoding: "buffer" });
+  if (patch.status !== 0) throw new Error(`生成补丁失败：${String(patch.stderr).trim().split("\n")[0]}`);
+  if (!patch.stdout.length) return { result };
+  m.state = "applying";
+  save();
+  const applied = git(iso.root, ["apply", "--whitespace=nowarn", "-"], { input: patch.stdout });
+  if (applied.signal) throw new Error(`合回被中断（${applied.signal}），主工作区可能只应用了一部分`);
+  // git apply 要么全部应用、要么都不应用；失败说明拍完 M 后主工作区又被没有租约的写入改过
+  if (applied.status !== 0) {
+    delete m.state;
+    return conflictOf(task, iso, iso.changed);
+  }
+  const off = mismatched(iso, main, result);
+  if (off.length) return { kind: "mismatch", error: `合回后主工作区与合并结果不一致：${list(off)}；需人工核对。查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` };
+  return { result };
+}
+
+// 合回：先按改动文件取写入租约（等与之重叠的运行中任务和排在前面的合回），再三方合并、应用，期间任务保持运行中。
+// 合并结果 R 与验收过的 T 不同（期间主工作区有别的改动）就用 recheck 在主工作区再验收，由它定最终状态。
+// 合回成功或没有改动：删 worktree 和全部私有引用，merge 里只留 state、files、rechecked
+export async function mergeBack(dir, task, iso, recheck) {
+  const m = task.merge;
+  m.files = iso.changed.map((rel) => shown(iso, rel)).sort();
+  let result = null;
+  if (iso.changed.length) {
+    task.merging = true;
+    save();
+    const abs = iso.changed.map((rel) => path.join(iso.root, rel));
+    const name = `${task.label}:合回`;
+    await leases.acquire(name, leaseOf(abs, iso.root));
+    let outcome;
+    try {
+      outcome = applyMerge(task, iso);
+    } catch (error) {
+      outcome = { kind: m.state === "applying" ? "interrupted" : "merge", error: error.message };
+    } finally {
+      leases.release(name);
+      delete task.merging;
+    }
+    if (outcome.error) return fail(task, outcome.kind, outcome.error);
+    // 合回的文件登记成这个任务写的，同期其他任务核对范围外变动、找冲突来源时认得出
+    if (!touchedBy.has(task.label)) touchedBy.set(task.label, new Set());
+    for (const file of abs) touchedBy.get(task.label).add(file);
+    result = outcome.result;
+  }
+  m.state = "applied";
+  active.delete(iso);
+  removeWorktree(iso.root, iso.wt, iso.links);
+  dropRefs(iso.root, iso.prefix);
+  for (const key of REF_KEYS) delete m[key];
+  delete task.worktree;
+  if (task.checks?.length && result && result !== iso.end) {
+    m.rechecked = true;
+    save();
+    await recheck();
+    if (task.status === "failed") task.error = `合回后在主工作区${task.error}`;
+    return;
+  }
+  task.status = "completed";
+  delete task.error;
+  delete task.failureKind;
+}
+
+// 续跑遇到上次合回写主工作区时中断（merge.state 仍是 applying）的任务：不复用、不自动重试、不反向应用，记为失败等人工核对
+export function interruptedMerge(old, phase) {
+  const m = old.merge;
+  const view = m.before && m.merged ? `；查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` : "";
+  return { ...old, phase, status: "failed", failureKind: "interrupted", error: `上次合回中断，需人工核对主工作区${view}` };
+}
+
+const WHY = { outside: "改动超出写入范围", anomaly: "环境目录链接被任务换掉", checks: "验收没过", execution: "执行失败" };
+
+// 汇总里隔离任务的行：合回结果或没合回的原因与查看、取回方式；环境指向主工作区时另起一行告警
+export function isolationLines(task) {
+  if (task.isolation !== "worktree") return [];
+  const lines = [];
+  if (task.envToMain?.length) lines.push(`⚠ 环境里的本地包指向主工作区，验收可能测的不是隔离里的代码：${list(task.envToMain)}`);
+  if (["pending", "running"].includes(task.status)) return lines;
+  const m = { ...task.merge };
+  // 被整个停掉时汇总在收尾之前打印：worktree 去留按 closeWorktree 的规则推断，result 引用名由 base 推出
+  const stopping = task.status === "cancelled" && task.worktree && !m.archiveError;
+  const keep = stopping ? task.keepWorktree || m.state === "applying" : !!task.worktree;
+  const kept = keep ? `worktree 保留在 ${task.worktree.path}；` : "";
+  if (stopping && !m.result && m.base) m.result = { ref: m.base.ref.replace(/\/base$/, "/result") };
+  if (m.state === "applying") lines.push(`⚠ 合回中断，主工作区可能只应用了一部分，需人工核对；${kept}${m.before && m.merged ? `查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` : ""}`);
+  else if (m.state === "applied") {
+    const recheck = m.rechecked ? `，已在主工作区重新验收${task.status === "failed" && task.checkFailed ? "（未通过）" : ""}` : "";
+    lines.push(m.files?.length ? `合回 ${m.files.length} 个文件${recheck}` : "没有改动，无需合回");
+  } else if (["conflict", "mismatch", "interrupted"].includes(task.failureKind)) lines.push(`⚠ ${kept}${task.error}`);
+  else if (m.result || kept) {
+    const why = task.status === "cancelled" ? "已停止" : ["merge", "archive"].includes(task.failureKind) ? task.error
+      : `${WHY[task.failureKind] ?? "任务没完成"}${task.failureKind === "anomaly" ? `：${list(m.anomalies)}` : ""}`;
+    lines.push(`⚠ 成果没合回（${why}）；${kept}${m.result ? viewOf(m) : ""}`.replace(/；$/, ""));
+  }
+  return lines;
+}
+
+// 过期运行记录清理（pruneOldRuns）用：删掉一次运行的私有引用和残留 worktree
+export const cleanRunArchives = (state) => cleanArchives(state, WORKTREES);
+
+// clean <runId>：进程不在运行时删掉这次运行的全部私有引用和残留 worktree，运行记录里对应的字段一并去掉
+export function cmdClean({ positionals }) {
+  const runId = positionals[0];
+  if (!runId) die("用法: clean <runId>");
+  const dir = runDir(runId);
+  const state = readJson(statePath(dir));
+  if (!state) die(`找不到运行记录: ${runId}`);
+  if (isAlive(state.pid) && state.status === "running") die(`${runId} 还在运行`, 1);
+  const { refs, worktrees } = cleanArchives(state, WORKTREES);
+  for (const t of state.tasks ?? []) {
+    delete t.worktree;
+    if (t.merge) for (const key of REF_KEYS) delete t.merge[key];
+  }
+  writeJson(statePath(dir), state);
+  process.stdout.write(`[codex-flow] 已清理 ${runId}：删除 ${refs} 个私有引用、${worktrees} 个 worktree\n`);
+}
