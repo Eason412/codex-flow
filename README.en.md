@@ -16,9 +16,9 @@ Current version: [V0.1.0](https://github.com/Eason412/codex-flow/releases/tag/V0
 ## ✨ Features
 
 - 🧭 **Parallel phases and pipelines**: A plan file lists only phases and tasks. Tasks within a phase run in parallel and phases run in order by default; a task with `after` starts as soon as its prerequisites finish, without waiting for slower tasks in the same phase. Results are quoted with `{{task:name}}` and `{{phase:title}}`, long prompts and shared context can live in files, and each task can run in its own directory.
-- 📺 **Live panel above the prompt**: The panel appears as soon as a task starts, laid out like Claude's Workflow detail view: phases on the left, agents on the right, each row with model, effort, tokens and elapsed time. Step in to read results.
+- 📺 **Live panel above the prompt**: The panel appears as soon as a task starts, laid out like Claude's Workflow detail view: phases on the left, agents on the right, each row with model, effort, tokens and elapsed time. Both columns are selectable at any time, and an agent opens to show its progress and result.
 - 🔢 **Live token usage**: Flow tasks update after each Codex reply; single tasks are read from the Codex session log every 2 seconds. Resuming or forking an earlier conversation counts only the current run.
-- ⏹️ **Native stop and completion notices**: A flow starts from a background Bash command, so pressing x in the Background list stops it, and Claude is notified when it ends. Single tasks stop with x in the panel, and `steer` adds instructions to a running task.
+- ⏹️ **Native stop and completion notices**: A flow starts from a background Bash command, so pressing x in the Background list stops it, and Claude is notified when it ends. Single tasks stop with x in the panel. A running flow task takes extra instructions from the steer field in the panel, or from Claude through the `steer` command.
 - 🛡️ **Write scope and acceptance checks**: A task can declare the paths it may change and the commands that accept its work. Afterwards the executor checks Codex's file-change records and the git worktree, flags writes outside the scope, and runs the checks in the task's directory; the task completes only if they all pass.
 - ♻️ **Resume with cached results**: With `--resume`, finished tasks whose prompts are unchanged reuse their results; only changed tasks and the tasks that depend on them run again. The final summary gives each task a conclusion of up to three lines, so the result files rarely need opening.
 - 🔍 **Verified models**: The model and effort in each report come from Codex's own session log, with ⚠ when they differ from the request or cannot be verified.
@@ -53,19 +53,20 @@ The mod only displays and reminds; tasks keep running when it is not loaded. Run
 
 ## 🖥️ Task panel
 
-With several tasks, each gets one row: flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends. Flows are purple, single agents blue, and the frame color follows the kinds of task in the list. Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻ indicator; when dependencies let phases start early, several pulse at once and the title line reads 「N 个阶段并行」 (N phases in parallel). Running agents carry a spinning blue dot; each phase row shows its number, status, name, completed count and elapsed time; the title line keeps the name and status on the left and aligns total tokens and total time with the columns below. Time and token columns reserve their maximum width so the layout does not shift as a run grows, and a short panel drops the frame cleanly instead of leaving stray borders.
+With several tasks, each gets one row: flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends. Flows are purple, single agents blue, and the frame color follows the kinds of task in the list. Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻ indicator; when dependencies let phases start early, several pulse at once and the title line reads 「N 个阶段并行」 (N phases in parallel). Running agents carry a spinning blue dot; each phase row shows its number, status, name, completed count and elapsed time; the top edge of the frame carries the name, status, total tokens and total time, and the bottom edge carries the key hints and buttons, so the frame costs no extra rows: when a long draft in the prompt squeezes the panel, the frame stays and the inner two-column box goes first. Time and token columns reserve their maximum width so the layout does not shift as a run grows. Both columns are selectable at any time: the cursor walks the phases on the left before the agents on the right, the right column follows the phase under the cursor, and finished phases can be opened too; `↑` on the first agent returns to the current phase.
 
 ![Task list: one flow and two single agents](docs/images/panel-list.png)
 
-Inside an agent, the right column shows its brief and result, and the left column switches to other agents in the same phase.
+Inside an agent, the right column shows its brief, its progress (counts of commands, file edits and messages, plus the latest steps) and its result, and the left column switches to other agents in the same phase. A running flow task has a steer field below: press `Enter` on the current agent to reach it, type an instruction and press `Enter`; the executor sends it to that task with Codex's turn/steer within a second, and progress shows whether it was delivered or rejected. Letters typed in the field never trigger `x`, `b` or `q`. Tasks in acceptance checks, finished tasks and single agents have no steer field: during checks Codex has already finished, and single agents run under `run.sh`, which cannot take steering.
 
-![Agent detail: brief and result](docs/images/panel-agent.png)
+![Agent detail: brief, progress, result and steer field](docs/images/panel-agent.png)
 
 | Key | Action |
 | --- | --- |
 | `ctrl+x tab` or a click on the panel | Move the keyboard to the panel |
 | `↑` `↓` (`←` `→` and `Tab` do the same) | Move between items |
-| `Enter` | Open a phase, view an agent's result |
+| `Enter` | Open a phase or an agent's detail; on the current agent in a detail, move to the steer field |
+| `Enter` in the steer field | Send the instruction to that agent |
 | `b` | Go back one level |
 | `x` | Stop the selected task or the whole flow |
 | `q` | Close the panel; appears once all tasks have ended |
