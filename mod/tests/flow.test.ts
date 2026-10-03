@@ -1029,7 +1029,7 @@ test('别的会话里结束的 flow 被本会话续跑后出现在面板上；�
   await ui.unmount()
 })
 
-test('运行中的阶段和 agent 用蓝色星形闪烁；选中的待开始阶段不变蓝，全部结束后停止转动', async ($, on) => {
+test('运行中的阶段用蓝色星形、agent 用蓝色细点阵；选中的待开始阶段不变蓝，全部结束后停止转动', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
   let frames = 0
@@ -1041,27 +1041,32 @@ test('运行中的阶段和 agent 用蓝色星形闪烁；选中的待开始阶�
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await clock.advance(2_000)
   const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
-  const SPIN = /^[·✢✳✶✻✽]$/
-  const spinners = async () => (await ui.findAll({ type: 'Text', text: SPIN })).map(t => [t.text, t.props.color])
-  // 运行中的阶段「审查」和 agent「性能」各一个蓝色星形
+  const STAR = /^[✢✳✶✻✽]$/
+  const DOTS = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]$/
+  const marks = async (pattern: RegExp) => (await ui.findAll({ type: 'Text', text: pattern })).map(t => [t.text, t.props.color])
+  const spinners = async () => [...(await marks(STAR)), ...(await marks(DOTS))]
+  // 运行中的阶段「审查」是星形，agent「性能」是细点阵，两种都是蓝色
+  expect((await marks(STAR)).length).toBe(1)
+  expect((await marks(DOTS)).length).toBe(1)
   const first = await spinners()
-  expect(first.length).toBe(2)
   expect(first.every(([, color]) => color === '#7AA2F7')).toBe(true)
   expect((await ui.find({ type: 'Text', text: /^2$/ }))?.props.color).toBeUndefined()
-  // 标题行只写状态、总 token、总时长；运行中的阶段在左栏写序号和耗时
-  expect(await ui.find({ type: 'Text', text: /^  运行中 · 15\.3k tok · \d+m\d{2}s$/ })).toBeDefined()
+  // 标题行：状态靠左；总 token、总时长靠右，分开对齐下方的栏位
+  expect(await ui.find({ type: 'Text', text: '  运行中' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '15.3k tok' })).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /^1$/ }))?.props.color).toBe('#7AA2F7')
-  expect((await ui.find({ type: 'Text', text: /^\d+m\d{2}s$/ }))?.props.color).toBe('#7AA2F7')
-  // 星形随时间变化
+  // 标题行的总时长是暗色；左栏运行中阶段的耗时是蓝色
+  expect((await ui.findAll({ type: 'Text', text: /^\d+m\d{2}s$/ })).some(t => t.props.color === '#7AA2F7')).toBe(true)
+  // 标记随时间变化
   await clock.advance(120)
   const second = await spinners()
   expect(second.map(([c]) => c)).not.toEqual(first.map(([c]) => c))
-  // 选中待开始的阶段：右栏换成它，但它不变蓝，运行中的阶段仍是蓝色星形
+  // 选中待开始的阶段：右栏换成它，但它不变蓝，运行中的阶段仍是蓝色标记
   await ui.press({ key: 'p:复核' })
   expect(await ui.find({ text: ' 复核 · 1 个 agent ' })).toBeDefined()
   expect((await ui.findAll({ type: 'Text', text: /^复核$/ })).every(t => t.props.color !== '#7AA2F7')).toBe(true)
   expect((await spinners()).length).toBeGreaterThan(0)
-  // 全部结束：不再有星形，帧数不再变化
+  // 全部结束：不再有运行标记，帧数不再变化
   w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, status: 'completed', endedAt: iso(254), phases: flowState.phases.map(p => ({ ...p, status: 'completed' })), tasks: flowState.tasks.map(t => ({ ...t, status: 'completed', endedAt: iso(254) })) })
   await clock.advance(2_000)
   expect((await spinners()).length).toBe(0)

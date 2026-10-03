@@ -25,8 +25,10 @@ const RED = '#F7768E'
 const YELLOW = '#E0AF68'
 const BLUE = '#7AA2F7'
 const PURPLE = '#BB9AF7'
-// 运行中的阶段和 agent 前面闪烁的星形（与 Claude Code 自己的 ✻ 指示一致），表示正在工作；只在有任务运行且面板显示时动
-const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢']
+// 运行中的标记，只在有任务运行且面板显示时动：阶段和 flow 用闪烁的星形（与 Claude Code 自己的 ✻ 指示一致），
+// agent 用转圈的细点阵，两层一眼能分开。星形不用「·」这一帧，免得看起来像停了。
+const SPIN = ['✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳']
+const AGENT_SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const SPIN_MS = 120
 // 会随运行增长的栏位按上限预留宽度，时间从 59s 长到 1h02m、token 从 999 长到 999.9k 时版面不跳
 // 时长最长 6 格（59m59s、99h59m），前留一格；token 最长 6 格（999.9k）加 " tok"，前留一格
@@ -181,7 +183,7 @@ async function loadResult($: Engine, run: FlowRun, task: FlowTask) {
 // fresh：/flow 打开时要自己读一遍，不用别的调用发起、可能已经过时的那次
 async function syncSpinner($: Engine) {
   const active = (await read($, shown)) && (await read($, runs)).some(r => r.status === 'running')
-  if (active && !spinTimer) spinTimer = $.clock.every(SPIN_MS, () => void update($, frame, n => (n + 1) % SPIN.length))
+  if (active && !spinTimer) spinTimer = $.clock.every(SPIN_MS, () => void update($, frame, n => (n + 1) % (SPIN.length * AGENT_SPIN.length)))
   if (!active && spinTimer) {
     spinTimer.cancel()
     spinTimer = null
@@ -545,15 +547,6 @@ function runSubtext(run: FlowRun) {
   return parts.join(' · ')
 }
 
-// flow 详情的标题行：阶段进度和 agent 数已在两栏里，这里只写状态、总 token 和总时长
-function flowHeader(run: FlowRun) {
-  const parts = [WORD[run.status] ?? run.status]
-  const tokens = tokensOf(run.tasks)
-  if (tokens) parts.push(`${formatTokens(tokens)} tok`)
-  parts.push(formatDuration(run.seconds))
-  return parts.join(' · ')
-}
-
 // 阶段耗时：已开始的 agent 中最长的一个（并行 agent 按墙钟算）；没开始的阶段为空
 function phaseTime(run: FlowRun, title: string) {
   const started = tasksOf(run, title).filter(t => !t.reused && t.status !== 'pending')
@@ -767,7 +760,9 @@ export const register: Register = on => {
     const list = await read($, runs)
     const at = await read($, nav)
     const hot = await read($, focused)
-    const spinner = SPIN[(await read($, frame)) % SPIN.length]
+    const tick = await read($, frame)
+    const spinner = SPIN[tick % SPIN.length]
+    const agentSpinner = AGENT_SPIN[tick % AGENT_SPIN.length]
     const canHide = !list.some(r => r.status === 'running')
     // 整块最宽 100 列，右边留 4 列给引擎的折叠按钮 [-]；高度够时外面加一圈彩色框，和上面的对话分开
     const bandColumns = Math.min(100, Math.max(40, (e.props.bodyColumns || 104) - 4))
@@ -822,12 +817,13 @@ export const register: Register = on => {
       return [...(above ? [above] : []), ...items, ...(below ? [below] : [])]
     }
 
-    const mark = (status: string, text?: string) => {
-      if (status === 'running' && text === undefined) return <Text color={BLUE}>{spinner}</Text>
+    // spin：运行中用的标记，默认是 agent 的细点阵
+    const mark = (status: string, spin = agentSpinner) => {
+      if (status === 'running') return <Text color={BLUE}>{spin}</Text>
       const [g, color] = glyph(status)
       return (
         <Text color={color} dimColor={!color}>
-          {text ?? g}
+          {g}
         </Text>
       )
     }
@@ -911,7 +907,7 @@ export const register: Register = on => {
               return (
                 <Box>
                   <Text color={BLUE}>{hot === key ? '❯ ' : '  '}</Text>
-                  {mark(r.status)}
+                  {mark(r.status, r.kind === 'flow' ? spinner : agentSpinner)}
                   <Text> </Text>
                   <Box width={6}>
                     <Text color={color}>{kind}</Text>
@@ -1038,7 +1034,8 @@ export const register: Register = on => {
     const titleWidth = Math.max(...run.phases.map(p => cells(`${p.title} · ${tasksOf(run, p.title).length} 个 agent`) + 3))
     const listWidth = Math.max(titleWidth, 4 + labelWidth + 1 + modelWidth + TOKEN_SLOT + TIME_SLOT)
     let rightWidth = Math.min(available, listWidth)
-    const modelCell = Math.max(1, Math.min(modelWidth, rightWidth - 5 - labelWidth - TOKEN_SLOT - TIME_SLOT))
+    // 模型栏吃掉多余宽度，token 和时长栏始终贴右，和标题行的总数对齐
+    const modelCell = Math.max(1, rightWidth - 5 - labelWidth - TOKEN_SLOT - TIME_SLOT)
 
     const border = (left: string, right: string, top: boolean) => {
       const seg = (w: number, title: string) => {
@@ -1207,14 +1204,25 @@ export const register: Register = on => {
     const target = level === 'agent' ? task : agents.find(t => taskKey(run.runId, t.label) === hot)
     const stop = !running ? null : level === 'phases' ? (run.kind === 'flow' ? '停止整个 flow' : '停止') : target?.status === 'running' ? '停止' : null
     const flowHints = ['ctrl+x tab 操作', ...hints]
+    // 标题行：名称和状态靠左，总 token 和总时长靠右，分别对齐下方 agent 的 token 栏和时长栏
+    const boxWidth = leftWidth + rightWidth + (framed ? 7 : 3)
+    const totalTokens = tokensOf(run.tasks)
     const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, cells(`${run.name}  ${WORD.running} · 999.9k tok · 99h59m`), footerCells(flowHints, stop, !outer)))
     return shell(PURPLE, flowWidth, (
       <Box flexDirection="column" width={flowWidth}>
         {showTitle && <Box>
-          <Text bold color={PURPLE}>
-            {run.name}
-          </Text>
-          <Text dimColor wrap="truncate-end">  {flowHeader(run)}</Text>
+          <Box width={Math.max(1, boxWidth - TOKEN_SLOT - TIME_SLOT - (framed ? 2 : 0))}>
+            <Text bold color={PURPLE} wrap="truncate-end">
+              {run.name}
+            </Text>
+            <Text dimColor>  {WORD[run.status] ?? run.status}</Text>
+          </Box>
+          <Box width={TOKEN_SLOT} justifyContent="flex-end">
+            <Text dimColor>{totalTokens ? `${formatTokens(totalTokens)} tok` : ''}</Text>
+          </Box>
+          <Box width={TIME_SLOT} justifyContent="flex-end">
+            <Text dimColor>{formatDuration(run.seconds)}</Text>
+          </Box>
         </Box>}
         <Box flexDirection="column">
           {framed && border(level === 'agent' ? `${phase ?? ''}` : '阶段', rightTitle, true)}
