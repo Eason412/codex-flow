@@ -17,7 +17,7 @@ Current version: [V0.2.0](https://github.com/Eason412/codex-flow/releases/tag/V0
 
 - 🧭 **Parallel phases and pipelines**: Tasks within a phase run in parallel and phases run in order by default; a task with `after` starts as soon as its prerequisites finish, without waiting for slower tasks in the same phase.
 - 📺 **Live panel above the prompt**: The panel appears as soon as a task starts, laid out like Claude's Workflow detail view with phases on the left and agents on the right; an agent opens to show its progress and result and takes extra instructions directly.
-- 🔢 **Live token usage**: Flow tasks update after each Codex reply; single tasks are read from the Codex session log every 2 seconds. Resuming or forking an earlier conversation counts only the current run.
+- 🔢 **Live token usage**: Counted the way Claude Code's "↓ N tokens" is, as the current context plus this run's output rather than the sum of every call's input; flow tasks update after each Codex reply, and single tasks are read from the Codex session log every 2 seconds.
 - ⏹️ **Native stop and completion notices**: A flow starts from a background Bash command, so pressing x in the Background list stops it, and Claude is notified when it ends; single tasks stop with x in the panel.
 - 🛡️ **Write scope and acceptance checks**: A task can declare the paths it may change and the commands that accept its work; writes outside the scope are flagged, and the task completes only if every check passes.
 - ♻️ **Resume with cached results**: With `--resume`, only changed tasks and the tasks that depend on them run again; the final summary gives each task a conclusion of up to three lines.

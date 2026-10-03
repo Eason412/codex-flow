@@ -191,6 +191,8 @@ for (const resumed of [false, true]) test(`watch 计算：${resumed ? '续接' :
   let task = readJson(statePath(dir)).tasks[0];
   assert.equal(task.tokenBaseline, base);
   assert.equal(task.tokens, 200);
+  // 面板口径：当前上下文（最近一次输入）+ 本次输出
+  assert.deepEqual([task.context, task.output], [120, 80]);
   const mtime = fs.statSync(statePath(dir)).mtimeMs;
   singleWatchTick(dir, reader);
   assert.equal(fs.statSync(statePath(dir)).mtimeMs, mtime);
@@ -199,8 +201,10 @@ for (const resumed of [false, true]) test(`watch 计算：${resumed ? '续接' :
   task = readJson(statePath(dir)).tasks[0];
   assert.equal(task.tokens, 350);
   assert.equal(task.tokenBaseline, base);
+  assert.deepEqual([task.context, task.output], [80, 150]);
   settleSingleTokens(task, start, end, usage(base + 200, 150));
   assert.equal(task.tokens, 350);
+  assert.deepEqual([task.context, task.output], [80, 150]);
 });
 
 test('watch：rollout 被压缩成 .zst 后不崩，保留最后实时值', () => {
@@ -376,6 +380,7 @@ test('多任务 flow 回归：假 app-server 的累计 token 口径、阶段结�
   const state = readJson(statePath(dir));
   assert.equal(state.status, 'completed');
   assert.deepEqual(state.tasks.map((task) => task.tokens), [987, 987]);
+  assert.deepEqual(state.tasks.map((task) => [task.context, task.output]), [[900, 87], [900, 87]]);
   assert.deepEqual(state.phases.map((phase) => phase.status), ['completed', 'completed']);
   assert.match(fs.readFileSync(path.join(dir, 'logs/二.prompt.txt'), 'utf8'), /假 flow 结果\n### 一\n假 flow 结果/);
   // PATH 中的 codex 改成遇到调用就失败，证明已完成任务被复用。

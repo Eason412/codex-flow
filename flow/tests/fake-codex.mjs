@@ -43,7 +43,7 @@ if (args[0] === 'app-server') {
         for (const [, rel] of prompt.matchAll(/BADPATCH:(\S+)/g)) {
           send({ method: 'item/completed', params: { item: { type: 'fileChange', id: rel, status: 'failed', changes: [{ path: path.resolve(process.cwd(), rel), kind: { type: 'add' }, diff: '' }] } } });
         }
-        send({ method: 'thread/tokenUsage/updated', params: { tokenUsage: { total: { totalTokens: 987 } } } });
+        send({ method: 'thread/tokenUsage/updated', params: { tokenUsage: { total: { totalTokens: 987, outputTokens: 87 }, last: { inputTokens: 900 } } } });
         if (prompt.includes('FAIL')) return send({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: '假失败' } } } });
         send({ method: 'item/completed', params: { item: { type: 'agentMessage', text } } });
         send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });

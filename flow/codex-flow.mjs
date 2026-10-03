@@ -475,6 +475,10 @@ async function runTask(dir, state, task, prompt, cwd) {
         if (m.method === "thread/tokenUsage/updated") {
           const total = p.tokenUsage?.total?.totalTokens;
           if (typeof total === "number") task.tokens = total;
+          // 面板照 Claude Code 的口径显示：最近一次调用的输入（当前上下文）+ 累计输出；tokens 保留累计用量供统计
+          const context = p.tokenUsage?.last?.inputTokens;
+          const output = p.tokenUsage?.total?.outputTokens;
+          if (Number.isFinite(context) && Number.isFinite(output)) Object.assign(task, { context, output });
         }
         const step = activityOf(m.method, item, cwd);
         if (step) {
@@ -1061,6 +1065,23 @@ export function usageTokens(usage) {
   return usage.input_tokens + usage.output_tokens;
 }
 
+// 当前上下文和本次运行的输出（Claude Code 的显示口径）。续接、分叉时输出从本次开始计：
+// 基线取开始前最后一条累计值，没有就用窗口内第一条的累计减去它自己那一次。
+function contextOf(task, info) {
+  const output = info.total_token_usage?.output_tokens;
+  const context = info.last_token_usage?.input_tokens;
+  const lastOutput = info.last_token_usage?.output_tokens;
+  if (!Number.isFinite(output) || !Number.isFinite(context)) return false;
+  if (!Number.isFinite(task.outputBaseline)) {
+    if (!Number.isFinite(lastOutput) || lastOutput > output) return false;
+    task.outputBaseline = output - lastOutput;
+  }
+  const own = output - task.outputBaseline;
+  if (own < 0 || (task.context === context && task.output === own)) return false;
+  Object.assign(task, { context, output: own });
+  return true;
+}
+
 function tokenInfo(event) {
   if (event.type !== "event_msg" || event.payload?.type !== "token_count") return null;
   const info = event.payload.info;
@@ -1088,6 +1109,7 @@ export function applyTokenRecords(task, records, startedAt, endedAt = null) {
       task.tokens = tokens;
       changed = true;
     }
+    if (contextOf(task, info)) changed = true;
   }
   return changed;
 }
@@ -1150,8 +1172,10 @@ export function settleSingleTokens(task, startedAt, endedAt, usage) {
   const file = findRollout(task.threadId);
   const records = file ? readCompleteRecords(file, { offset: 0 }) : [];
   if (!Number.isFinite(task.tokenBaseline)) {
-    if (!task.resumed && !task.forkedFrom) task.tokenBaseline = 0;
-    else {
+    if (!task.resumed && !task.forkedFrom) {
+      task.tokenBaseline = 0;
+      task.outputBaseline ??= 0;
+    } else {
       let latest = -Infinity;
       for (const event of records) {
         const timestamp = Date.parse(event.timestamp);
@@ -1159,6 +1183,7 @@ export function settleSingleTokens(task, startedAt, endedAt, usage) {
         if (timestamp < Date.parse(startedAt) && timestamp >= latest && info) {
           latest = timestamp;
           task.tokenBaseline = usageTokens(info.total_token_usage);
+          if (Number.isFinite(info.total_token_usage.output_tokens)) task.outputBaseline = info.total_token_usage.output_tokens;
         }
       }
     }

@@ -158,7 +158,8 @@ function toRun(dir: string, state: any, now: number, alive: Set<number>): FlowRu
         error: t.error ?? null,
         log: t.log ?? null,
         reused: t.reused === true,
-        tokens: typeof t.tokens === 'number' ? t.tokens : null,
+        // 照 Claude Code 的口径显示：当前上下文 + 本次运行的输出；旧记录没有这两项时退回累计用量
+        tokens: typeof t.context === 'number' && typeof t.output === 'number' ? t.context + t.output : typeof t.tokens === 'number' ? t.tokens : null,
         recent: Array.isArray(t.recent)
           ? t.recent.filter((s: any) => s && typeof s.kind === 'string' && typeof s.text === 'string')
               .map((s: any) => ({ kind: s.kind, text: s.text, ...(typeof s.status === 'string' ? { status: s.status } : {}) }))

@@ -1017,6 +1017,22 @@ test('外框的上边写标题、下边放页脚，不另占行：草稿变长�
   await ui.unmount()
 })
 
+test('token 照 Claude Code 的口径显示：当前上下文加本次输出，不是每次调用输入的累计；旧记录退回累计值', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  const tasks = flowState.tasks.map(t => (t.label === '性能' ? { ...t, tokens: 3_000_000, context: 180_000, output: 25_000 } : t))
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, tasks })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '205k tok' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '3M tok' })).toBeUndefined()
+  // 安全没有 context/output，仍显示累计的 3000
+  expect(await ui.find({ type: 'Text', text: '3k tok' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('只剩一行内容时 flow 画一行摘要：当前阶段进度和全部 agent，详情页不再只剩一个 agent 和插话框', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
