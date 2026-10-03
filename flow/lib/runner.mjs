@@ -190,8 +190,12 @@ async function afterTask(dir, state, task) {
   save();
 }
 
+// 同时存在的隔离 worktree 上限：每个占一份检出的磁盘（8.5k 文件的仓库约 240MB），超出的隔离任务排队
+const MAX_WORKTREES = Number(process.env.CODEX_FLOW_MAX_WORKTREES) || 4;
+
 function scheduleTasks(dir, state, planTasks, deps) {
   const cwd = state.cwd;
+  let worktrees = 0;
   // 前置任务都结束就开跑；前置任务一个都没完成时记为跳过，等它的任务随之跳过
   const byLabel = new Map(state.tasks.map((t) => [t.label, t]));
   const settled = (t) => ["completed", "failed", "cancelled", "skipped"].includes(t.status);
@@ -212,21 +216,26 @@ function scheduleTasks(dir, state, planTasks, deps) {
           const t = planTasks.get(task.label);
           const taskCwd = t.cwd ?? cwd;
           // 写入范围和运行中的任务（或排队中的合回）重叠就先等着，前者结束时会再走到这里
-          const lease = task.recheck || t.isolation === "worktree" ? null : leaseOf(t.writes, taskCwd);
+          const isolated = !task.recheck && t.isolation === "worktree";
+          const lease = task.recheck || isolated ? null : leaseOf(t.writes, taskCwd);
           const blockers = leases.blockers(lease, task.label);
-          if (blockers.length) {
-            task.waiting = blockers;
+          if (blockers.length || (isolated && worktrees >= MAX_WORKTREES)) {
+            task.waiting = blockers.length ? blockers : ["worktree 上限"];
             continue;
           }
           delete task.waiting;
           leases.hold(task.label, lease);
+          if (isolated) worktrees++;
           (task.recheck ? recheckTask(dir, task, taskCwd) : runTask(dir, state, task, promptFor(dir, state, task, t), taskCwd))
             .catch((error) => {
               task.status = "failed";
               task.error = `执行出错：${error.message}`;
               task.endedAt = nowIso();
             })
-            .then(() => afterTask(dir, state, task))
+            .then(() => {
+              if (isolated) worktrees--;
+              return afterTask(dir, state, task);
+            })
             .then(step);
         }
       }
