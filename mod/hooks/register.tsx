@@ -929,7 +929,10 @@ export const register: Register = on => {
       )
     }
 
-    type Head = { name: string; color: string; sub: string; right?: string }
+    // parts：sub 分段上色（不带颜色的段画成暗色），整段放得下时才用，放不下退回截短的暗色 sub
+    type Part = { text: string; color?: string }
+    type Head = { name: string; color: string; sub: string; right?: string; parts?: Part[] }
+    const drawParts = (parts: Part[]) => parts.map(p => <Text color={p.color} dimColor={!p.color}>{p.text}</Text>)
     // back：返回键的文字，默认「返回」；toList：返回直接回任务列表（一行摘要里用）
     type Foot = { hints: string[]; stop: string | null; canBack: boolean; back?: string; toList?: boolean }
     // 带快捷键的无边框按钮画成「x: 停止」，比文字多三格
@@ -974,7 +977,9 @@ export const register: Register = on => {
           <Box flexDirection="column" width={width}>
             {showTitle && <Box width={width}>
               <Text bold color={head.color} wrap="truncate-end">{head.name}</Text>
-              <Text dimColor wrap="truncate-end">  {[head.sub, head.right].filter(Boolean).join(' · ')}</Text>
+              {head.parts && cells(head.name) + cells(`  ${[head.sub, head.right].filter(Boolean).join(' · ')}`) <= width
+                ? drawParts([{ text: '  ' }, ...head.parts, ...(head.right ? [{ text: ` · ${head.right}` }] : [])])
+                : <Text dimColor wrap="truncate-end">  {[head.sub, head.right].filter(Boolean).join(' · ')}</Text>}
             </Box>}
             {body}
           </Box>
@@ -993,7 +998,7 @@ export const register: Register = on => {
           <Box>
             <Text color={color}>╭─ </Text>
             <Text bold color={head.color}>{name}</Text>
-            {sub ? <Text dimColor>{sub}</Text> : null}
+            {sub && head.parts && sub === `  ${head.sub}` ? drawParts([{ text: '  ' }, ...head.parts]) : sub ? <Text dimColor>{sub}</Text> : null}
             <Text color={color}> {'─'.repeat(topDash)}</Text>
             {right ? <Text dimColor>{right}</Text> : null}
             <Text color={color}>─╮</Text>
@@ -1028,7 +1033,15 @@ export const register: Register = on => {
       const flows = cur.filter(r => r.kind === 'flow').length
       const singles = cur.length - flows
       const active = cur.filter(r => r.status === 'running').length
-      const summary = [flows && `${flows} 个 flow`, singles && `${singles} 个 agent`, active ? `${active} 个运行中` : '全部结束'].filter(Boolean).join(' · ')
+      // 标题按类型上色：flow 紫色、agent 蓝色，与各行的类型标记一致；右上角写全部任务的 token 合计
+      const summaryParts: Part[] = [
+        ...(flows ? [{ text: `${flows} 个 flow`, color: PURPLE }] : []),
+        ...(singles ? [{ text: `${singles} 个 agent`, color: BLUE }] : []),
+        { text: active ? `${active} 个运行中` : '全部结束' },
+      ].flatMap((p, i) => (i ? [{ text: ' · ' }, p] : [p]))
+      const summary = summaryParts.map(p => p.text).join('')
+      const total = cur.reduce((sum, r) => sum + tokensOf(r.tasks), 0)
+      const totalText = total ? `${formatTokens(total)} tok` : ''
       const statsOfRun = (r: FlowRun) => {
         const task = r.tasks[0]
         if (r.kind === 'single' && task) return agentStats(task)
@@ -1042,7 +1055,8 @@ export const register: Register = on => {
       // token 会增长：已有 token 的按 999.9k 预留，运行中还没有 token 的预留「 · 999.9k tok」
       const grow = (r: FlowRun) => { const n = tokensOf(r.tasks); return n ? 6 - formatTokens(n).length : r.status === 'running' ? cells(' · 999.9k tok') : 0 }
       const statsWidth = Math.max(4, Math.min(columns - 17 - nameWidth, Math.max(...cur.map(r => cells(statsOfRun(r)) + grow(r))) + 1))
-      const listWidth = Math.min(columns, Math.max(17 + nameWidth + statsWidth, cells(`Codex  ${summary}`) + 3, footerCells(foot) + 2))
+      // 合计会增长，按 999.9k 预留，数字变长时方框不跳
+      const listWidth = Math.min(columns, Math.max(17 + nameWidth + statsWidth, cells(`Codex  ${summary}`) + (total || active ? cells(' 999.9k tok ') : 0) + 3, footerCells(foot) + 2))
       const listColor = flows && singles ? CYAN : flows ? PURPLE : BLUE
       const open = async (r: FlowRun) => {
         const phase = defaultPhase(r)
@@ -1063,7 +1077,11 @@ export const register: Register = on => {
         const put = (node: RenderElement, w: number) => { nodes.push(node); used += w }
         if (!showTitle) {
           put(<Text bold color={CYAN}>Codex</Text>, 5)
-          put(<Text dimColor>{`  ${summary} │ `}</Text>, cells(`  ${summary} │ `))
+          // 一行里任务名称优先：前面只写各类数量（运行中看图标），token 合计放行尾，放得下才写
+          const counts = summaryParts.slice(0, -2)
+          const parts: Part[] = [{ text: '  ' }, ...(counts.length ? counts : summaryParts), { text: ' │ ' }]
+          for (const node of drawParts(parts)) nodes.push(node)
+          used += parts.reduce((w, p) => w + cells(p.text), 0)
         }
         for (let i = 0; i < cur.length; i++) {
           const r = cur[i]!
@@ -1081,7 +1099,9 @@ export const register: Register = on => {
           put(<Button plain key={runKey(r.runId)} label={name} onPress={() => open(r)} />, cells(name))
           if (progress) put(<Text dimColor>{progress}</Text>, cells(progress))
         }
-        return shell(listColor, lineWidth, { name: 'Codex', color: CYAN, sub: summary }, <Box width={lineWidth}>{nodes}</Box>, 1, { hints: [], stop: null, canBack: false })
+        const tail = !showTitle && totalText ? ` · ${totalText}` : ''
+        if (tail && used + cells(tail) <= lineWidth) put(<Text dimColor>{tail}</Text>, cells(tail))
+        return shell(listColor, lineWidth, { name: 'Codex', color: CYAN, sub: summary, parts: summaryParts, right: totalText }, <Box width={lineWidth}>{nodes}</Box>, 1, { hints: [], stop: null, canBack: false })
       }
       const lines = withMore(win.items.map(r => {
         const key = runKey(r.runId)
@@ -1108,7 +1128,7 @@ export const register: Register = on => {
           </Box>
         )
       }), 'runs', win, true)
-      return shell(listColor, listWidth, { name: 'Codex', color: CYAN, sub: summary }, <Box flexDirection="column">{lines}</Box>, lines.length, foot)
+      return shell(listColor, listWidth, { name: 'Codex', color: CYAN, sub: summary, parts: summaryParts, right: totalText }, <Box flexDirection="column">{lines}</Box>, lines.length, foot)
     }
 
     type Line = { text: string; color?: string; dim?: boolean; bold?: boolean }

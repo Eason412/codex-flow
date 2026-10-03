@@ -1091,6 +1091,24 @@ test('看一个任务时标题写「另有 N 个任务」，返回键写「返�
   await ui.unmount()
 })
 
+test('任务列表的标题按类型上色（flow 紫色、agent 蓝色），右上角写全部任务的 token 合计', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.files[`${ROOT}/s-1/state.json`] = JSON.stringify({ ...singleState, tasks: [{ ...singleState.tasks[0], context: 4000, output: 655 }] })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  expect((await ui.find({ type: 'Text', text: '1 个 flow' }))?.props.color).toBe('#BB9AF7')
+  expect((await ui.find({ type: 'Text', text: '1 个 agent' }))?.props.color).toBe('#7AA2F7')
+  // flow 3000 + 12345，单发 4000 + 655
+  expect(await ui.find({ type: 'Text', text: ' 20k tok ' })).toBeDefined()
+  // 两行时没有外框，标题行照样分段上色、写合计
+  await ui.redraw({ ...(PROPS as object), maxRows: 2 } as never)
+  expect((await ui.find({ type: 'Text', text: '1 个 flow' }))?.props.color).toBe('#BB9AF7')
+  expect(await ui.find({ type: 'Text', text: ' · 20k tok' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('只剩一行内容时列表画成一行：全部任务都在，名称可进入；flow 摘要提示另有任务，三行时返回键直接回列表', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)

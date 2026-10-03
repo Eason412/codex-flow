@@ -58,7 +58,7 @@ Claude Code main conversation
 
 - **Order**: With several tasks, each gets one row; flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends.
 - **Several tasks**: When a new task starts while you are viewing another, the panel stays where it is and the top edge of the frame says "另有 N 个任务" (N other tasks); press `b` (返回列表, back to list) to return to the list and pick another.
-- **Colors**: Flows are purple and single agents blue; the frame color follows the kinds of task in the list.
+- **Colors**: Flows are purple and single agents blue; the frame color follows the kinds of task in the list. The flow and agent counts in the list title use the same colors, and the top-right corner shows the token total across all tasks.
 - **Running marks**: Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻; running agents carry a spinning blue dot. When several phases run at once they all pulse, and the top edge of the frame reads 「N 个阶段并行」 (N phases in parallel).
 - **Frame**: The top edge carries the name, status, total tokens and total time; the bottom edge carries the key hints and buttons, so the frame costs no extra rows. When a long draft in the prompt squeezes the panel, the frame stays and the inner two-column box goes first.
 - **Phase column**: Each row shows number, status, name, completed count and elapsed time; time and token columns reserve their maximum width so the layout does not shift as a run grows.
