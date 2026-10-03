@@ -66,7 +66,7 @@ export function inScope(file, patterns, cwd) {
   const rel = path.relative(realPath(cwd), file);
   const undot = (p) => p.replace(/(^|\/)\./g, "$1\u0000");
   return scopePatterns(patterns, cwd).some((p) =>
-    p === "" || rel === p || rel.startsWith(`${p}/`) || path.matchesGlob(undot(rel), undot(p)));
+    (p === "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) || rel === p || rel.startsWith(`${p}/`) || path.matchesGlob(undot(rel), undot(p)));
 }
 
 // 越界：Codex 自己的改文件记录里出现了范围外的路径，确定是这个任务写的。

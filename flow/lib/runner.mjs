@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { briefOf, isAlive, newRunId, nowIso, promptHash, pruneOldRuns, readJson, runDir, statePath, serviceTierOf, writeJson } from "./state.mjs";
-import { ALERT_AFTER, checkProcs, current, die, fileSafe, save, servers, SESSION, setCurrent } from "./runtime.mjs";
+import { ALERT_AFTER, checkProcs, current, die, fileSafe, markStopping, save, servers, SESSION, setCurrent, stopping } from "./runtime.mjs";
 import { literal, loadPlan, loadSchema, renderPrompt, validatePlan, withContract } from "./plan.mjs";
 import { inScope, realPath } from "./scope.mjs";
 import { finishChecks, killGroup, recheckTask } from "./checks.mjs";
@@ -15,11 +15,10 @@ import { runTask } from "./task.mjs";
 import { cleanRunArchives, closeActive, interruptedMerge, isolationFields } from "./isolation.mjs";
 import { overallStatus, phaseStatus, renderSummary } from "./summary.mjs";
 
-let stopping = false;
 export async function onStop(signal) {
   if (!current) process.exit(143);
   if (stopping) return;
-  stopping = true;
+  markStopping();
   for (const child of checkProcs) killGroup(child, "SIGKILL");
   const { state } = current;
   const at = nowIso();
@@ -138,10 +137,12 @@ function populateFlowTasks(dir, state, previous, planTasks, deps, rerun, notes) 
   };
   const reuse = (old, t) => {
     const entry = { ...old, phase: t.phase, reused: true, writes: t.writes, checks: t.checks };
-    delete entry.stale;
     delete entry.staleRerun;
     delete entry.waiting;
-    if (staleFor(t.label).length) entry.stale = staleFor(t.label);
+    // 复用的仍是同一份旧结果：上次已提示过期的文件继续提示，只有真正重跑才清掉
+    const stale = [...new Set([...(old.stale ?? []), ...staleFor(t.label)])].sort();
+    if (stale.length) entry.stale = stale;
+    else delete entry.stale;
     if (old.checkFailed || !sameJson(old.checks ?? [], t.checks ?? [])) Object.assign(entry, { status: "pending", recheck: true });
     if (old.scope && !sameJson(old.writes, t.writes)) entry.scope = rescope(old.scope, t);
     return entry;
@@ -191,7 +192,8 @@ async function afterTask(dir, state, task) {
   leases.release(task.label);
   try {
     meterReport(dir, task);
-    for (const other of recordCollisions(state, task)) await recheckCollision(dir, state, other, task.label);
+    const recheck = recordCollisions(state, task);
+    if (!stopping) for (const other of recheck) await recheckCollision(dir, state, other, task.label);
   } catch {
     // 计量和碰撞检查出错不影响任务结果
   }

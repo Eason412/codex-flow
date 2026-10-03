@@ -44,11 +44,13 @@ export function runPlan(plan, args = [], env = fakePath(), timeout = 15000) {
   return command(['run', file, ...args], { env, timeout });
 }
 
-// 最近一次运行（按目录名排序取最后一个）
+// 最近一次运行：按开始时间取最后一个（同一秒内的 runId 后缀随机，不能按目录名排）
 export function lastRun() {
-  const ids = fs.readdirSync(RUNS).filter((n) => n.startsWith('r-')).sort();
-  const dir = path.join(RUNS, ids.at(-1));
-  return { dir, state: readJson(statePath(dir)) };
+  const runs = fs.readdirSync(RUNS).filter((n) => n.startsWith('r-')).map((id) => {
+    const dir = path.join(RUNS, id);
+    return { dir, state: readJson(statePath(dir)) };
+  });
+  return runs.sort((a, b) => (a.state?.startedAt ?? '').localeCompare(b.state?.startedAt ?? '') || a.dir.localeCompare(b.dir)).at(-1);
 }
 export const taskOf = (state, label) => state.tasks.find((t) => t.label === label);
 

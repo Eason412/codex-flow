@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { viaLink } from "./workspace.mjs";
 
 export const git = (cwd, args, { env, ...options } = {}) =>
   spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1 << 28, env: { ...process.env, ...env }, ...options });
@@ -33,10 +34,11 @@ function marked(wt, runId) {
   }
 }
 
-// 删 worktree：先只 unlink 受管链接（不跟随），再解锁、注销、删目录；git 和 rmSync 本身也不跟随符号链接。
+// 删 worktree：先只 unlink 受管链接（不跟随；上级被换成链接的跳过，免得沿链接删到主工作区里），再解锁、注销、删目录；
+// git 和 rmSync 本身也不跟随符号链接。
 // 这次运行的最后一个 worktree 删掉后，顺手删空的上级目录
 export function removeWorktree(repo, wt, links = []) {
-  for (const rel of links) if (isLink(path.join(wt, rel))) fs.unlinkSync(path.join(wt, rel));
+  for (const rel of links) if (!viaLink(wt, rel) && isLink(path.join(wt, rel))) fs.unlinkSync(path.join(wt, rel));
   git(repo, ["worktree", "unlock", wt]);
   git(repo, ["worktree", "remove", "--force", wt]);
   fs.rmSync(wt, { recursive: true, force: true });

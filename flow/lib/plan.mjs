@@ -4,9 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { checkModelEffort, readJson } from "./state.mjs";
-import { die, here } from "./runtime.mjs";
+import { die, fileSafe, here } from "./runtime.mjs";
 import { estimate } from "./meter.mjs";
-import { isolationBlocker } from "./isolation.mjs";
+import { isolationBlocker, nameOf } from "./isolation.mjs";
 
 const SCHEMAS = path.resolve(here, "..", "schemas");
 
@@ -91,7 +91,22 @@ export function validatePlan(plan) {
       checkIsolation(plan, task);
     }
   }
+  checkNameClashes(plan.phases.flatMap((p) => p.tasks));
   return dependencies(plan);
+}
+
+// 结果、日志和停止文件按 fileSafe 后的任务名存，隔离任务的 worktree 目录和私有引用按 nameOf 后的任务名存；
+// 归一化后相同（macOS 默认文件系统不分大小写，也算上只差大小写的）会互相覆盖，拒绝启动
+function checkNameClashes(tasks) {
+  const key = (name) => name.normalize("NFC").toLowerCase();
+  for (const [form, pick] of [[fileSafe, () => true], [nameOf, (t) => t.isolation === "worktree"]]) {
+    const seen = new Map();
+    for (const task of tasks.filter(pick)) {
+      const k = key(form(task.label));
+      if (seen.has(k)) die(`任务「${seen.get(k)}」和「${task.label}」的名字只差标点、空白或大小写，存结果或隔离目录时会重名，改其中一个`);
+      seen.set(k, task.label);
+    }
+  }
 }
 
 // 计划顶层的 isolation 作为任务默认值展开到任务上；非 git 目录、有已初始化子模块的仓库拒绝启动

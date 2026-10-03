@@ -52,12 +52,27 @@ export class Leases {
     if (this.held.delete(name)) this.wake();
   }
 
+  // 排队取租约：取到时得到 true，排队中被 cancel 撤下时得到 false
   acquire(name, lease) {
-    if (!lease) return Promise.resolve();
+    if (!lease) return Promise.resolve(true);
     return new Promise((resolve) => {
       this.queue.push({ name, lease, resolve });
       this.wake();
     });
+  }
+
+  cancel(name) {
+    const i = this.queue.findIndex((w) => w.name === name);
+    if (i < 0) return;
+    const [w] = this.queue.splice(i, 1);
+    w.resolve(false);
+    this.wake();
+  }
+
+  // name 持有的租约是否已覆盖 lease 的每一条路径
+  covers(name, lease) {
+    const held = this.held.get(name) ?? [];
+    return (lease ?? []).every((p) => held.some((h) => within(p, h)));
   }
 
   wake() {
@@ -68,7 +83,7 @@ export class Leases {
       if (busy) continue;
       this.queue.splice(i--, 1);
       this.held.set(w.name, w.lease);
-      w.resolve();
+      w.resolve(true);
     }
   }
 }
