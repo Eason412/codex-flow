@@ -182,15 +182,18 @@ test('任务开始时面板自动出现在输入框上方：flow 紫色、agent 
     expect((await ui.find({ type: 'Text', text: /^review-api$/ }))?.props.color).toBe('#BB9AF7')
     expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
     expect(await ui.find({ text: ' 审查 · 2 个 agent ' })).toBeDefined()
-    expect(await ui.find({ text: '6.1-sol high · 12.3k tok' })).toBeDefined()
-    expect(await ui.find({ text: '6.1-sol high · 3k tok' })).toBeDefined()
+    // 模型、token、耗时分栏，token 和耗时按上限预留宽度、靠右对齐
+    expect(await ui.find({ text: '6.1-sol high' })).toBeDefined()
+    expect(await ui.find({ text: '12.3k tok' })).toBeDefined()
+    expect(await ui.find({ text: '3k tok' })).toBeDefined()
     expect(await ui.find({ text: '复用' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 't:r-1:性能' })).toBeUndefined()
 
     // Enter 阶段进入右栏选 agent；返回回到阶段栏
     await ui.press({ key: 'p:复核' })
     expect(await ui.find({ type: 'Button', key: 't:r-1:汇总复核' })).toBeDefined()
-    expect(await ui.find({ text: '6-astra high · 等待' })).toBeDefined()
+    expect(await ui.find({ text: '6-astra high' })).toBeDefined()
+    expect(await ui.find({ text: '等待' })).toBeDefined()
     await ui.press({ key: 'back' })
     expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
 
@@ -1065,5 +1068,31 @@ test('运行中的阶段和 agent 用蓝色星形闪烁；选中的待开始阶�
   const framesBefore = frames
   await clock.advance(1_000)
   expect(frames).toBe(framesBefore)
+  await ui.unmount()
+})
+
+test('时长从秒长到小时、token 从千长到百万时 flow 面板宽度不变；高度不够画方框时不留左右竖线', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = w.dirs.filter(d => d !== 's-1')
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  const width = async () => { const root = await ui.drawn(); return 'props' in root ? (root.props as { width?: number }).width : undefined }
+  const before = await width()
+  expect(before).toBeGreaterThan(0)
+  // 运行中的 agent 改成一小时前开始、token 过百万
+  const grown = { ...flowState, startedAt: iso(-3600), tasks: flowState.tasks.map(t => (t.status === 'running' ? { ...t, startedAt: iso(-3600), tokens: 1_234_567 } : t)) }
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(grown)
+  await clock.advance(2_000)
+  expect(await ui.find({ text: '1.2M tok' })).toBeDefined()
+  expect(await ui.find({ text: /^1h\d{2}m$/ })).toBeDefined()
+  expect(await width()).toBe(before)
+  expect(await ui.find({ type: 'Text', text: /^│ $/ })).toBeDefined()
+  // 只给 5 行：标题、两行内容、页脚，不画方框，也不画只剩左右竖线的残框
+  await ui.redraw({ ...(PROPS as object), maxRows: 5 } as never)
+  expect(await ui.find({ type: 'Text', text: /^│ $/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^ │$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
   await ui.unmount()
 })

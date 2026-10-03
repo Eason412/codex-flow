@@ -28,6 +28,10 @@ const PURPLE = '#BB9AF7'
 // 运行中的阶段和 agent 前面闪烁的星形（与 Claude Code 自己的 ✻ 指示一致），表示正在工作；只在有任务运行且面板显示时动
 const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢']
 const SPIN_MS = 120
+// 会随运行增长的栏位按上限预留宽度，时间从 59s 长到 1h02m、token 从 999 长到 999.9k 时版面不跳
+// 时长最长 6 格（59m59s、99h59m），前留一格；token 最长 6 格（999.9k）加 " tok"，前留一格
+const TIME_SLOT = 7
+const TOKEN_SLOT = 11
 // 按类型区分：flow 紫色，单个 agent 蓝色；按钮文字上不了色，所以在名称前标类型
 const KIND: Record<FlowRun['kind'], [string, string]> = { flow: ['flow', PURPLE], single: ['agent', BLUE] }
 
@@ -784,10 +788,12 @@ export const register: Register = on => {
       return text + parts.reduce((sum, n) => sum + n, 0) + Math.max(0, parts.length - 1) * 3
     }
     const run = list.find(r => r.runId === at.runId)
-    // 至少留一行内容；高度不足时依次省去边框、页脚、标题。
+    // 至少留一行内容；高度不足时依次省去方框、页脚、标题。页脚有返回、停止按钮，优先于方框保留。
+    // flow 两栏视图只在内容（最多三行）放得下时画方框；不画方框时左右竖线一起省，不留只剩竖线的残框。
+    const needRows = run && at.level ? (at.level === 'agent' ? 12 : Math.min(12, Math.max(run.phases.length, tasksOf(run, at.phase ?? defaultPhase(run)).length))) : 0
     const showTitle = rows >= 2
     const showFooter = rows >= 3
-    const framed = !!(run && at.level && rows >= 5)
+    const framed = !!(run && at.level) && rows >= 2 + Number(showTitle) + Number(showFooter) + Math.min(needRows, 3)
     const fixedRows = Number(showTitle) + Number(showFooter) + (framed ? 2 : 0)
     const bodyRows = rows - fixedRows
     windowSize = Math.min(12, Math.max(1, bodyRows - 2))
@@ -885,7 +891,9 @@ export const register: Register = on => {
         return parts.join(' · ')
       }
       const listHints = ['ctrl+x tab 操作', '↑/↓ 选择', 'Enter 查看']
-      const statsWidth = Math.max(4, Math.min(columns - 17 - nameWidth, Math.max(...cur.map(r => cells(statsOfRun(r)))) + 1))
+      // token 会增长：已有 token 的按 999.9k 预留，运行中还没有 token 的预留「 · 999.9k tok」
+      const grow = (r: FlowRun) => { const n = tokensOf(r.tasks); return n ? 6 - formatTokens(n).length : r.status === 'running' ? cells(' · 999.9k tok') : 0 }
+      const statsWidth = Math.max(4, Math.min(columns - 17 - nameWidth, Math.max(...cur.map(r => cells(statsOfRun(r)) + grow(r))) + 1))
       const listWidth = Math.min(columns, Math.max(17 + nameWidth + statsWidth, cells(`Codex  ${summary}`), footerCells(listHints, null, false)))
       const listColor = flows && singles ? CYAN : flows ? PURPLE : BLUE
       return shell(listColor, listWidth, (
@@ -1013,24 +1021,24 @@ export const register: Register = on => {
     const agents = tasksOf(run, phase)
     const level = at.level
     const task = level === 'agent' ? agents.find(t => t.label === at.label) : undefined
-    const statsOf = agentStats
     // 宽度按整个 flow 的内容算（换阶段时方框不跳），只占需要的宽度
-    const countWidth = Math.max(3, ...run.phases.map(p => `${doneOf(tasksOf(run, p.title))}/${tasksOf(run, p.title).length}`.length))
-    // 阶段一行：选中标记 2 + 序号 + 空格 + 图标 + 空格 + 名称 + 进度 + 空格 + 耗时
+    // 进度按「总数/总数」预留，完成数进位时不跳
+    const countWidth = Math.max(3, ...run.phases.map(p => `${tasksOf(run, p.title).length}/${tasksOf(run, p.title).length}`.length))
+    // 阶段一行：选中标记 2 + 序号 + 空格 + 图标 + 空格 + 名称 + 进度 + 耗时（固定预留）
     const numWidth = String(run.phases.length).length
-    const timeWidth = Math.max(0, ...run.phases.map(p => phaseTime(run, p.title).length))
-    const timeCell = timeWidth ? timeWidth + 1 : 0
+    const timeCell = TIME_SLOT
     const leftWidth =
       level === 'agent'
         ? Math.min(20, Math.max(16, ...agents.map(t => cells(t.label) + 4)))
         : Math.min(32, Math.max(16, Math.max(4, ...run.phases.map(p => cells(p.title))) + 6 + numWidth + countWidth + timeCell))
     const available = columns - leftWidth - 7
     const labelWidth = Math.min(16, Math.max(4, ...run.tasks.map(t => cells(t.label))))
-    // agent 一行：选中标记 2 + 图标 1 + 空格 1 + 名称 labelWidth+1 + 说明 + 耗时 7（含前面一格空）
+    // agent 一行：选中标记 2 + 图标 1 + 空格 1 + 名称 labelWidth+1 + 模型 effort + token（固定预留）+ 耗时（固定预留）
+    const modelWidth = Math.max(4, ...run.tasks.map(t => cells(`${shortModel(t.model)} ${t.effort}`)))
     const titleWidth = Math.max(...run.phases.map(p => cells(`${p.title} · ${tasksOf(run, p.title).length} 个 agent`) + 3))
-    const listWidth = Math.max(titleWidth, labelWidth + 12 + Math.max(4, ...run.tasks.map(t => cells(statsOf(t)))))
+    const listWidth = Math.max(titleWidth, 4 + labelWidth + 1 + modelWidth + TOKEN_SLOT + TIME_SLOT)
     let rightWidth = Math.min(available, listWidth)
-    const statsWidth = Math.max(4, rightWidth - labelWidth - 12)
+    const modelCell = Math.max(1, Math.min(modelWidth, rightWidth - 5 - labelWidth - TOKEN_SLOT - TIME_SLOT))
 
     const border = (left: string, right: string, top: boolean) => {
       const seg = (w: number, title: string) => {
@@ -1151,7 +1159,9 @@ export const register: Register = on => {
       const rightWin = windowed(agents, 'agents', t => taskKey(run.runId, t.label), preferred)
       rightCells = withMore(rightWin.items.map(t => {
         const key = taskKey(run.runId, t.label)
-        const stats = statsOf(t)
+        const tokens = t.tokens ? `${formatTokens(t.tokens)} tok` : ''
+        // 耗时栏：运行中和完成写时长，复用写「复用」，其余写状态（等待、失败等）
+        const time = agentTime(t) || (WORD[t.status] ?? t.status)
         return (
           <Box>
             <Text color={BLUE}>{level === 'agents' && hot === key ? '❯ ' : '  '}</Text>
@@ -1164,11 +1174,14 @@ export const register: Register = on => {
                 <Text dimColor={t.status !== 'running'}>{fit(t.label, labelWidth)}</Text>
               )}
             </Box>
-            <Box width={statsWidth}>
-              <Text dimColor>{fit(stats, statsWidth)}</Text>
+            <Box width={modelCell}>
+              <Text dimColor>{fit(`${shortModel(t.model)} ${t.effort}`, modelCell)}</Text>
             </Box>
-            <Box width={7} justifyContent="flex-end">
-              <Text dimColor>{agentTime(t)}</Text>
+            <Box width={TOKEN_SLOT} justifyContent="flex-end">
+              <Text dimColor>{tokens}</Text>
+            </Box>
+            <Box width={TIME_SLOT} justifyContent="flex-end">
+              <Text dimColor>{time}</Text>
             </Box>
           </Box>
         )
@@ -1179,11 +1192,11 @@ export const register: Register = on => {
     const height = Math.max(leftCells.length, rightCells.length)
     const body = Array.from({ length: height }, (_, i) => (
       <Box>
-        <Text dimColor>│ </Text>
+        {framed && <Text dimColor>│ </Text>}
         <Box width={leftWidth}>{leftCells[i] ?? <Text> </Text>}</Box>
         <Text dimColor> │ </Text>
         <Box width={rightWidth}>{rightCells[i] ?? <Text> </Text>}</Box>
-        <Text dimColor> │</Text>
+        {framed && <Text dimColor> │</Text>}
       </Box>
     ))
     const running = run.status === 'running'
@@ -1194,7 +1207,7 @@ export const register: Register = on => {
     const target = level === 'agent' ? task : agents.find(t => taskKey(run.runId, t.label) === hot)
     const stop = !running ? null : level === 'phases' ? (run.kind === 'flow' ? '停止整个 flow' : '停止') : target?.status === 'running' ? '停止' : null
     const flowHints = ['ctrl+x tab 操作', ...hints]
-    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, cells(`${run.name}  ${flowHeader(run)}`), footerCells(flowHints, stop, !outer)))
+    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, cells(`${run.name}  ${WORD.running} · 999.9k tok · 99h59m`), footerCells(flowHints, stop, !outer)))
     return shell(PURPLE, flowWidth, (
       <Box flexDirection="column" width={flowWidth}>
         {showTitle && <Box>
