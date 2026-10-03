@@ -15,11 +15,11 @@
 
 ## ✨ 特点
 
-- 🧭 **分阶段并行编排**：计划文件只写阶段和任务。同一阶段的任务并行，阶段之间按顺序，后一阶段用 `{{phase:标题}}` 引用前一阶段的结果；任务数量不设上限。
+- 🧭 **分阶段并行与流水线**：计划文件只写阶段和任务。同一阶段的任务并行，阶段之间默认按顺序；任务写上 `after` 后，前置一完成就开跑，不等同阶段的慢任务。结果用 `{{task:名字}}`、`{{phase:标题}}` 引用，长提示词和共用背景可放进文件，每个任务可在自己的目录运行。
 - 📺 **输入框上方的实时面板**：任务开始时面板自动出现，结构参照 Claude Workflow 的详情面板：左栏阶段，右栏 agent，每行显示模型、effort、token 和耗时，逐层进入即可查看结果。
 - 🔢 **实时 token 用量**：flow 任务在 Codex 每次回复后更新用量，单个任务每 2 秒从 Codex 会话记录读取；续接或分叉旧对话时只计本次运行。
 - ⏹️ **原生停止与完成通知**：flow 由后台 Bash 启动，在 Background 列表按 x 即可停止，结束时自动通知 Claude；单个任务在面板中按 x 停止，`steer` 可向运行中的任务补充指示。
-- ♻️ **续跑复用结果**：`--resume` 时已完成且提示词未改的任务直接复用结果，只重跑改动的任务及其后续阶段。
+- ♻️ **续跑复用结果**：`--resume` 时已完成且提示词未改的任务直接复用结果，只重跑改动的任务和依赖它的任务。结束时的汇总给每个任务附三行以内的结论，多数情况不必再打开结果文件。
 - 🔍 **实际模型核实**：报告中的模型和 effort 取自 Codex 自己的会话记录，与请求不一致或无法核实时标出 ⚠。
 - ⏱️ **15 分钟排查提醒**：任务每运行满 15 分钟，mod 在对话中提醒 Claude 读取日志并向用户汇报；任务不会被自动停止，也不会只凭时长被判定为卡住。
 - 🔒 **模型白名单**：`models.json` 列出允许的模型和 effort，名单外的请求在启动前即被拒绝。
@@ -52,7 +52,7 @@ mod 只负责显示和提醒；mod 未加载时，任务照常运行。运行记
 
 ## 🖥️ 任务面板
 
-同时有多个任务时一行一个：flow 固定排在单个 agent 上面，同类中新开始的在上；任务结束后位置不变。flow 用紫色，单个 agent 用蓝色，外框颜色随列表中的任务类型变化。运行中的 flow 和阶段前面是闪烁的蓝色星形（与 Claude Code 的 ✻ 指示一致），运行中的 agent 前面是转圈的蓝色细点阵；阶段一栏依次显示序号、状态、名称、完成数和耗时；标题行左边是名称和状态，右边的总 token 和总时长对齐下方栏位。时长和 token 栏按上限预留宽度，运行变长时版面不跳；高度不够时先省方框，不留残框。
+同时有多个任务时一行一个：flow 固定排在单个 agent 上面，同类中新开始的在上；任务结束后位置不变。flow 用紫色，单个 agent 用蓝色，外框颜色随列表中的任务类型变化。运行中的 flow 和阶段前面是闪烁的蓝色星形（与 Claude Code 的 ✻ 指示一致），按依赖提前开跑时几个阶段同时闪烁，标题行写「N 个阶段并行」；运行中的 agent 前面是转圈的蓝色细点阵；阶段一栏依次显示序号、状态、名称、完成数和耗时；标题行左边是名称和状态，右边的总 token 和总时长对齐下方栏位。时长和 token 栏按上限预留宽度，运行变长时版面不跳；高度不够时先省方框，不留残框。
 
 ![任务列表：一个 flow 和两个单个 agent](docs/images/panel-list.png)
 
@@ -93,19 +93,22 @@ mod 只负责显示和提醒；mod 未加载时，任务照常运行。运行记
 日常使用时，在对话中让 Claude「交给 Codex」，或说明有几个可以并行、分阶段的任务；Claude 按 [SKILL.md](SKILL.md) 选择模型、写计划并在后台启动。命令也可以直接在 Claude Code 会话中运行，面板只显示本会话派出的任务。
 
 ```json
-{"name": "review-api", "cwd": "/path/to/repo",
+{"name": "docs", "cwd": "/path/to/repos",
  "phases": [
+   {"title": "撰写", "tasks": [
+     {"label": "甲文档", "model": "gpt-6.1-sol", "effort": "high", "cwd": "repo-a", "promptFile": "write-a.md"},
+     {"label": "乙文档", "model": "gpt-6.1-sol", "effort": "high", "cwd": "repo-b", "promptFile": "write-b.md"}]},
    {"title": "审查", "tasks": [
-     {"label": "安全", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "prompt": "…"},
-     {"label": "性能", "model": "gpt-6.1-sol", "effort": "high", "prompt": "…"}]},
-   {"title": "复核", "tasks": [
-     {"label": "汇总复核", "model": "gpt-6-astra", "effort": "high", "prompt": "复核下面的审查结果：\n{{phase:审查}}"}]}]}
+     {"label": "甲审查", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "cwd": "repo-a", "after": ["甲文档"], "prompt": "{{file:review.md}}\n{{task:甲文档}}"},
+     {"label": "汇总", "model": "gpt-6-astra", "effort": "high", "prompt": "复核：\n{{phase:撰写}}"}]}]}
 ```
+
+「甲审查」写了 `after`，「甲文档」完成后立即开始；「汇总」没写，等整个撰写阶段结束。`promptFile` 和 `{{file:}}` 相对计划文件所在目录，任务的 `cwd` 相对计划的 `cwd`。
 
 | 命令 | 作用 |
 | --- | --- |
 | `run.sh -m <模型> -e <effort> "<任务>"` | 运行单个任务；`-r` 续接、`-f` 分叉、`-w` 使用新 worktree、`-j` 按 schema 返回 |
-| `flow/codex-flow.mjs run <plan.json>` | 按计划分阶段运行，flow 结束才退出，放在后台 Bash 中启动 |
+| `flow/codex-flow.mjs run <plan.json>` | 按计划和任务依赖运行，flow 结束才退出，放在后台 Bash 中启动 |
 | `flow/codex-flow.mjs run --resume <runId>` | 续跑，复用已完成的任务 |
 | `flow/codex-flow.mjs status [runId]` | 查看本会话的运行记录 |
 | `flow/codex-flow.mjs cancel <runId> [任务名]` | 停止整个 flow 或其中一个任务 |

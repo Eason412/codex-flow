@@ -50,22 +50,25 @@ node ~/.claude/skills/codex/flow/codex-flow.mjs run <plan.json>
 ```
 
 ```json
-{"name": "review-api", "cwd": "/path/to/repo",
+{"name": "docs", "cwd": "/path/to/repos",
  "phases": [
+   {"title": "撰写", "tasks": [
+     {"label": "甲文档", "model": "gpt-6.1-sol", "effort": "high", "cwd": "repo-a", "promptFile": "write-a.md"},
+     {"label": "乙文档", "model": "gpt-6.1-sol", "effort": "high", "cwd": "repo-b", "promptFile": "write-b.md"}]},
    {"title": "审查", "tasks": [
-     {"label": "安全", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "prompt": "…"},
-     {"label": "性能", "model": "gpt-6.1-sol", "effort": "high", "prompt": "…"}]},
-   {"title": "复核", "tasks": [
-     {"label": "汇总复核", "model": "gpt-6-astra", "effort": "high", "prompt": "复核下面的审查结果：\n{{phase:审查}}"}]}]}
+     {"label": "甲审查", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "cwd": "repo-a", "after": ["甲文档"], "prompt": "{{file:review.md}}\n撰写结果：{{task:甲文档}}"},
+     {"label": "汇总", "model": "gpt-6-astra", "effort": "high", "prompt": "复核：\n{{phase:撰写}}"}]}]}
 ```
 
-- 阶段按顺序跑，同一阶段的任务并行，数量不设上限，按任务需要定。某个阶段全部失败时，后面的阶段跳过。
-- `{{phase:标题}}` 换成该阶段所有任务的结果，`{{task:名字}}` 换成单个任务的结果；没完成的任务换成一行说明。
+- 调度：没写 `after` 的任务等上一阶段全部结束，同一阶段的任务并行，数量不设上限。写了 `after`（任务名或阶段标题的数组）的任务只等列出的任务，前置一完成就开跑，不等同阶段的慢任务；上例「甲审查」在「甲文档」写完后立刻开始，不等「乙文档」。要流水线就写 `after`，不写就是按阶段顺序。
+- `{{phase:标题}}` 换成该阶段所有任务的结果，`{{task:名字}}` 换成单个任务的结果，被引用的任务自动算作前置。前置任务一个都没完成时，这个任务记为跳过，等它的任务也跟着跳过。引用不存在的任务、引用自己所在的阶段或依赖成环时拒绝启动。
+- 长 prompt 写进文件用 `promptFile`；几个任务共用的背景放进文件，用 `{{file:路径}}` 引用。两者都相对计划文件所在目录，在启动时读进计划，不会读到其他任务运行中写出的内容，那些用 `{{task:}}` 或让 Codex 自己读。
+- `cwd` 可以写在任务上，相对计划的 `cwd`；不写就用计划的 `cwd`。
 - `label` 在整个计划里唯一，会显示给用户，用简短中文名；`brief` 可选，是 `/flow` 详情页里的一句话说明；`schema` 用内置的 `review` / `opinion` / `result` 或 schema 文件路径。模型和 effort 照上面的分工表，只能用 `models.json` 里的。
-- 结束时会收到后台任务通知。读输出里的汇总（也在运行目录的 `summary.txt`），再按结果路径读要细看的结果；汇总里出现「⚠ 实际模型」要告诉用户。
+- 结束时会收到后台任务通知。读输出里的汇总（也在运行目录的 `summary.txt`）：每个任务下有三行以内的结论，schema 结果写判断、问题数和 summary，md 结果取正文第一段；不用 schema 的任务在 prompt 里要求回复先用三行以内写结论。需要细看时再按结果路径读；汇总里出现「⚠ 实际模型」要告诉用户。
 - 停整个 flow：用户在 Background 里按 x，或我用 TaskStop。停单个任务：用户在 `/flow` 面板按 x，或 `codex-flow.mjs cancel <runId> <label>`。中途补充要求：`codex-flow.mjs steer <runId> <label> "<内容>"`。看进度：`codex-flow.mjs status [runId]`。
-- 续跑：`codex-flow.mjs run <改过的 plan.json> --resume <runId>`，或不给计划只写 `run --resume <runId>`。没改过且已完成的任务复用结果，改过的任务和它后面阶段的任务重跑。
-- 显示部分：输入框上方的任务面板和提醒是 `mod/` 下的 mod，由 `~/.claude/settings.json` 的 `CLAUDE_CODE_PLUGIN_DIRS` 加载到每个会话（之前已开着的会话要重开才加载）。flow 和 run.sh 单个任务开始时面板自动出现（flow 紫色、agent 蓝色）；有任务在跑时面板不能关闭，全部结束后可按 q 关闭，否则自动打开的面板在 30 秒后收起；关闭后同一批任务不再弹出。`/flow` 只负责打开，面板已自动打开时输 `/flow` 会转为手动打开，结束后不自动收起。面板右上角的 `[-]` 是 Claude Code 自带的折叠，折叠后只剩一行「▸ plugin panel hidden」，插件解除不了，用户点那一行或按 ctrl+x ctrl+a 展开。任务很多时各列只显示一段窗口，用「还有 N 个」翻动。面板显示时状态行（`flow/statusline.mjs`，ccstatusline 调用）不画 codex 那一行，靠 mod 写的 `~/.claude/codex-flow/panel-<会话>.json` 判断。改 mod 后跑 `claude plugin validate` 和 `claude plugin test`；改执行器后跑 `node --test flow/tests/`。
+- 续跑：`codex-flow.mjs run <改过的 plan.json> --resume <runId>`，或不给计划只写 `run --resume <runId>`。没改过且已完成的任务复用结果，改过的任务和等它的任务重跑。
+- 显示部分：输入框上方的任务面板和提醒是 `mod/` 下的 mod，由 `~/.claude/settings.json` 的 `CLAUDE_CODE_PLUGIN_DIRS` 加载到每个会话（之前已开着的会话要重开才加载）。flow 和 run.sh 单个任务开始时面板自动出现（flow 紫色、agent 蓝色）；有任务在跑时面板不能关闭，全部结束后可按 q 关闭，否则自动打开的面板在 30 秒后收起；关闭后同一批任务不再弹出。`/flow` 只负责打开，面板已自动打开时输 `/flow` 会转为手动打开，结束后不自动收起。面板右上角的 `[-]` 是 Claude Code 自带的折叠，折叠后只剩一行「▸ plugin panel hidden」，插件解除不了，用户点那一行或按 ctrl+x ctrl+a 展开。任务很多时各列只显示一段窗口，用「还有 N 个」翻动。按 `after` 提前开跑时几个阶段会同时显示蓝色星形，标题行写「N 个阶段并行」，默认看第一个运行中的阶段，↑/↓ 切换。面板显示时状态行（`flow/statusline.mjs`，ccstatusline 调用）不画 codex 那一行，靠 mod 写的 `~/.claude/codex-flow/panel-<会话>.json` 判断。改 mod 后跑 `claude plugin validate` 和 `claude plugin test`；改执行器后跑 `node --test flow/tests/`。
 
 # 跑满 15 分钟时排查
 

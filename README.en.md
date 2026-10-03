@@ -15,11 +15,11 @@ Current version: [V0.1.0](https://github.com/Eason412/codex-flow/releases/tag/V0
 
 ## ✨ Features
 
-- 🧭 **Parallel phases**: A plan file lists only phases and tasks. Tasks within a phase run in parallel, phases run in order, and a later phase quotes an earlier one's results with `{{phase:title}}`. There is no cap on the number of tasks.
+- 🧭 **Parallel phases and pipelines**: A plan file lists only phases and tasks. Tasks within a phase run in parallel and phases run in order by default; a task with `after` starts as soon as its prerequisites finish, without waiting for slower tasks in the same phase. Results are quoted with `{{task:name}}` and `{{phase:title}}`, long prompts and shared context can live in files, and each task can run in its own directory.
 - 📺 **Live panel above the prompt**: The panel appears as soon as a task starts, laid out like Claude's Workflow detail view: phases on the left, agents on the right, each row with model, effort, tokens and elapsed time. Step in to read results.
 - 🔢 **Live token usage**: Flow tasks update after each Codex reply; single tasks are read from the Codex session log every 2 seconds. Resuming or forking an earlier conversation counts only the current run.
 - ⏹️ **Native stop and completion notices**: A flow starts from a background Bash command, so pressing x in the Background list stops it, and Claude is notified when it ends. Single tasks stop with x in the panel, and `steer` adds instructions to a running task.
-- ♻️ **Resume with cached results**: With `--resume`, finished tasks whose prompts are unchanged reuse their results; only changed tasks and the phases after them run again.
+- ♻️ **Resume with cached results**: With `--resume`, finished tasks whose prompts are unchanged reuse their results; only changed tasks and the tasks that depend on them run again. The final summary gives each task a conclusion of up to three lines, so the result files rarely need opening.
 - 🔍 **Verified models**: The model and effort in each report come from Codex's own session log, with ⚠ when they differ from the request or cannot be verified.
 - ⏱️ **15-minute check-ins**: Each time a task passes another 15 minutes, the mod asks Claude in the conversation to read the log and report to the user. Tasks are never stopped automatically, and elapsed time alone never marks a task as stuck.
 - 🔒 **Model allowlist**: `models.json` lists the allowed models and efforts; any other request is refused before it starts.
@@ -52,7 +52,7 @@ The mod only displays and reminds; tasks keep running when it is not loaded. Run
 
 ## 🖥️ Task panel
 
-With several tasks, each gets one row: flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends. Flows are purple, single agents blue, and the frame color follows the kinds of task in the list. Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻ indicator, and running agents a spinning blue dot; each phase row shows its number, status, name, completed count and elapsed time; the title line keeps the name and status on the left and aligns total tokens and total time with the columns below. Time and token columns reserve their maximum width so the layout does not shift as a run grows, and a short panel drops the frame cleanly instead of leaving stray borders.
+With several tasks, each gets one row: flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends. Flows are purple, single agents blue, and the frame color follows the kinds of task in the list. Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻ indicator; when dependencies let phases start early, several pulse at once and the title line reads 「N 个阶段并行」 (N phases in parallel). Running agents carry a spinning blue dot; each phase row shows its number, status, name, completed count and elapsed time; the title line keeps the name and status on the left and aligns total tokens and total time with the columns below. Time and token columns reserve their maximum width so the layout does not shift as a run grows, and a short panel drops the frame cleanly instead of leaving stray borders.
 
 ![Task list: one flow and two single agents](docs/images/panel-list.png)
 
@@ -93,19 +93,22 @@ The user must do one thing in person: sign in to the Codex CLI (`codex login`).
 Day to day, ask Claude to "hand it to Codex", or describe several tasks that can run in parallel or in phases; Claude follows [SKILL.md](SKILL.md) (Chinese) to choose models, write a plan and start it in the background. The commands also work when run directly inside a Claude Code session; the panel shows only the tasks dispatched from that session.
 
 ```json
-{"name": "review-api", "cwd": "/path/to/repo",
+{"name": "docs", "cwd": "/path/to/repos",
  "phases": [
+   {"title": "write", "tasks": [
+     {"label": "doc-a", "model": "gpt-6.1-sol", "effort": "high", "cwd": "repo-a", "promptFile": "write-a.md"},
+     {"label": "doc-b", "model": "gpt-6.1-sol", "effort": "high", "cwd": "repo-b", "promptFile": "write-b.md"}]},
    {"title": "review", "tasks": [
-     {"label": "security", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "prompt": "…"},
-     {"label": "performance", "model": "gpt-6.1-sol", "effort": "high", "prompt": "…"}]},
-   {"title": "recheck", "tasks": [
-     {"label": "summary", "model": "gpt-6-astra", "effort": "high", "prompt": "Recheck these review results:\n{{phase:review}}"}]}]}
+     {"label": "review-a", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "cwd": "repo-a", "after": ["doc-a"], "prompt": "{{file:review.md}}\n{{task:doc-a}}"},
+     {"label": "summary", "model": "gpt-6-astra", "effort": "high", "prompt": "Recheck:\n{{phase:write}}"}]}]}
 ```
+
+`review-a` has `after`, so it starts as soon as `doc-a` finishes; `summary` has none and waits for the whole write phase. `promptFile` and `{{file:}}` are relative to the plan file's directory, and a task's `cwd` is relative to the plan's `cwd`.
 
 | Command | Action |
 | --- | --- |
 | `run.sh -m <model> -e <effort> "<task>"` | Run one task; `-r` resume, `-f` fork, `-w` new worktree, `-j` reply in a schema |
-| `flow/codex-flow.mjs run <plan.json>` | Run a plan in phases; exits when the flow ends, so start it from background Bash |
+| `flow/codex-flow.mjs run <plan.json>` | Run a plan by phases and task dependencies; exits when the flow ends, so start it from background Bash |
 | `flow/codex-flow.mjs run --resume <runId>` | Resume, reusing finished tasks |
 | `flow/codex-flow.mjs status [runId]` | Show this session's runs |
 | `flow/codex-flow.mjs cancel <runId> [task]` | Stop the whole flow or one task |
