@@ -4,7 +4,7 @@
   "required": ["status", "summary", "changed_files", "verification", "open_issues"],
   "properties": {
     "status": {"type": "string", "enum": ["done", "partial", "blocked"]},
-    "summary": {"type": "string"},
+    "summary": {"type": "string", "description": "结论，三行以内：做了什么、结果如何、是否需要主代理处理"},
     "changed_files": {"type": "array", "items": {"type": "string"}},
     "verification": {"type": "string"},
     "open_issues": {"type": "array", "items": {"type": "string"}}

@@ -15,7 +15,7 @@ delete process.env.CLAUDE_CODE_SESSION_ID;
 const stateLib = await import('../lib/state.mjs');
 const flow = await import('../codex-flow.mjs');
 const { RUNS, HOME, readJson, writeJson, statePath, pruneOldRuns, readModelConfig } = stateLib;
-const { indentJson, singleContext, singleWatchTick, watchSingle, findRollout, settleSingleTokens, readCompleteRecords } = flow;
+const { indentJson, singleContext, singleWatchTick, watchSingle, findRollout, settleSingleTokens, readCompleteRecords, conclusionOf } = flow;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const windowStart = Date.now() - 60000;
 const start = new Date(windowStart).toISOString();
@@ -383,6 +383,168 @@ test('多任务 flow 回归：假 app-server 的累计 token 口径、阶段结�
   const resumed = command(['run', '--resume', state.runId], { env, timeout: 5000 });
   assert.equal(resumed.status, 0, resumed.stdout + resumed.stderr);
   assert.ok(readJson(statePath(dir)).tasks.every((task) => task.reused));
+});
+
+const sol = { model: 'gpt-6.1-sol', effort: 'high' };
+const runPlan = (plan, args = [], env = fakePath()) => {
+  const file = path.join(root, 'plan.json');
+  writeJson(file, plan);
+  return command(['run', file, ...args], { env, timeout: 10000 });
+};
+const onlyRun = () => {
+  const dir = path.join(RUNS, fs.readdirSync(RUNS)[0]);
+  return { dir, state: readJson(statePath(dir)) };
+};
+const taskOf = (state, label) => state.tasks.find((t) => t.label === label);
+
+test('after 让任务在前置完成后立即开跑，不等同阶段的慢任务；没写 after 的仍等上一阶段', () => {
+  const result = runPlan({ name: '流水线', cwd: root, phases: [
+    { title: '撰写', tasks: [{ label: '快', ...sol, prompt: '快任务' }, { label: '慢', ...sol, prompt: 'SLOW' }] },
+    { title: '审查', tasks: [{ label: '审快', ...sol, after: ['快'], prompt: '{{task:快}}' }, { label: '收尾', ...sol, prompt: '收尾' }] },
+  ] });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const { state } = onlyRun();
+  const at = (label, key) => Date.parse(taskOf(state, label)[key]);
+  assert.ok(at('审快', 'startedAt') < at('慢', 'endedAt'), '审快 应在 慢 结束前开始');
+  assert.ok(at('收尾', 'startedAt') >= at('慢', 'endedAt'), '收尾 应等整个撰写阶段');
+  assert.deepEqual(state.phases.map((p) => p.status), ['completed', 'completed']);
+});
+
+test('前置任务失败时依赖它的任务跳过并逐级传递，flow 正常退出', () => {
+  const result = runPlan({ name: '失败传递', cwd: root, phases: [
+    { title: '一', tasks: [{ label: '坏', ...sol, prompt: 'FAIL' }, { label: '好', ...sol, prompt: '好' }] },
+    { title: '二', tasks: [{ label: '等坏', ...sol, after: ['坏'], prompt: '等坏' }, { label: '等好', ...sol, after: ['好'], prompt: '等好' }] },
+    { title: '三', tasks: [{ label: '等等坏', ...sol, after: ['等坏'], prompt: '等等坏' }] },
+  ] });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const { state } = onlyRun();
+  assert.deepEqual(state.tasks.map((t) => [t.label, t.status]), [['坏', 'failed'], ['好', 'completed'], ['等坏', 'skipped'], ['等好', 'completed'], ['等等坏', 'skipped']]);
+  assert.deepEqual(state.phases.map((p) => p.status), ['partial', 'partial', 'skipped']);
+  assert.equal(state.status, 'failed');
+  assert.match(result.stdout, /○ 等坏 .*前置任务都没有完成/);
+});
+
+test('续跑只重跑改过的任务和等它的任务，其余复用', () => {
+  const phases = (aPrompt) => [
+    { title: '一', tasks: [{ label: 'a', ...sol, prompt: aPrompt }, { label: 'b', ...sol, prompt: 'b' }] },
+    { title: '二', tasks: [{ label: 'c', ...sol, after: ['a'], prompt: 'c' }, { label: 'd', ...sol, after: ['b'], prompt: 'd' }] },
+  ];
+  assert.equal(runPlan({ name: '续跑', cwd: root, phases: phases('a') }).status, 0);
+  const { state } = onlyRun();
+  const resumed = runPlan({ name: '续跑', cwd: root, phases: phases('a 改过') }, ['--resume', state.runId]);
+  assert.equal(resumed.status, 0, resumed.stdout + resumed.stderr);
+  const after = readJson(statePath(onlyRun().dir));
+  assert.deepEqual(after.tasks.map((t) => [t.label, !!t.reused]), [['a', false], ['b', true], ['c', false], ['d', true]]);
+});
+
+test('续跑时前置任务或工作目录变了也重跑，并传给下游', () => {
+  fs.mkdirSync(path.join(root, 'other'), { recursive: true });
+  const plan = (bAfter, cwd = root) => ({ name: '续跑变更', cwd, phases: [{ title: '一', tasks: [
+    { label: 'a', ...sol, prompt: 'a' }, { label: 'b', ...sol, after: bAfter, prompt: 'b' }, { label: 'c', ...sol, after: ['b'], prompt: 'c' },
+  ] }] });
+  assert.equal(runPlan(plan(['a'])).status, 0);
+  const { dir, state } = onlyRun();
+  const resume = (next) => {
+    const result = runPlan(next, ['--resume', state.runId]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return readJson(statePath(dir)).tasks.map((t) => [t.label, !!t.reused]);
+  };
+  // b 不再等 a：b 和下游 c 重跑，a 复用
+  assert.deepEqual(resume(plan([])), [['a', true], ['b', false], ['c', false]]);
+  // 只改计划的 cwd：所有任务都在新目录重跑
+  assert.deepEqual(resume(plan([], path.join(root, 'other'))), [['a', false], ['b', false], ['c', false]]);
+  assert.equal(readJson(statePath(dir)).cwd, path.join(root, 'other'));
+});
+
+test('旧计划没存 cwd 时，不带计划续跑仍在上次的工作目录运行', () => {
+  const repo = path.join(root, 'repo');
+  fs.mkdirSync(repo, { recursive: true });
+  assert.equal(runPlan({ name: '旧计划', cwd: repo, phases: [{ title: '一', tasks: [{ label: '甲', ...sol, prompt: 'CWD' }] }] }).status, 0);
+  const { dir, state } = onlyRun();
+  // 模拟旧版本：plan.json 没有 cwd，任务失败待重跑
+  const saved = readJson(path.join(dir, 'plan.json'));
+  delete saved.cwd;
+  writeJson(path.join(dir, 'plan.json'), saved);
+  writeJson(statePath(dir), { ...state, status: 'failed', tasks: state.tasks.map((t) => ({ ...t, status: 'failed', result: undefined })) });
+  const resumed = command(['run', '--resume', state.runId], { env: fakePath(), timeout: 10000, cwd: os.tmpdir() });
+  assert.equal(resumed.status, 0, resumed.stdout + resumed.stderr);
+  const after = readJson(statePath(dir));
+  assert.equal(after.cwd, repo);
+  assert.equal(fs.readFileSync(path.join(dir, after.tasks[0].result), 'utf8').trim(), `cwd=${fs.realpathSync(repo)}`);
+});
+
+test('结论提取容错：null、非对象、未知严重级别和多行判断字段', () => {
+  const dir = path.join(root, 'res');
+  fs.mkdirSync(dir, { recursive: true });
+  const of = (value) => {
+    fs.writeFileSync(path.join(dir, 'r.json'), JSON.stringify(value));
+    return conclusionOf(dir, { result: 'r.json' });
+  };
+  assert.deepEqual(of(null), []);
+  assert.deepEqual(of([1, 2]), []);
+  assert.deepEqual(of('文本'), []);
+  assert.deepEqual(of({ verdict: 'fail', findings: [{ severity: 'high' }, null, { severity: 'major' }] }), ['fail · 1 major, 2 其他']);
+  assert.deepEqual(of({ verdict: 'pass', findings: [] }), ['pass · 无问题']);
+  assert.deepEqual(of({ verdict: 'A\nB\nC\nD', summary: 'E\nF' }), ['A · B · C · D', 'E', 'F']);
+  assert.deepEqual(of({ judgment: '可以', confidence: 'high' }), ['confidence high', '可以']);
+});
+
+test('promptFile 与 {{file:}} 按计划目录展开，任务 cwd 相对 plan.cwd；展开后的计划供续跑', () => {
+  const planDir = path.join(root, 'plans');
+  fs.mkdirSync(path.join(planDir, 'parts'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'repo', 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(planDir, 'parts', 'shared.md'), '共享背景\n');
+  fs.writeFileSync(path.join(planDir, 'task.md'), 'CWD\n{{file:parts/shared.md}}');
+  const file = path.join(planDir, 'plan.json');
+  writeJson(file, { name: '展开', cwd: path.join(root, 'repo'), phases: [{ title: '一', tasks: [
+    { label: '子目录', ...sol, cwd: 'sub', promptFile: 'task.md' },
+    { label: '默认', ...sol, prompt: 'CWD' },
+  ] }] });
+  const env = fakePath();
+  const result = command(['run', file], { env, timeout: 10000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const { dir, state } = onlyRun();
+  const real = (p) => fs.realpathSync(p);
+  assert.equal(fs.readFileSync(path.join(dir, taskOf(state, '子目录').result), 'utf8').trim(), `cwd=${real(path.join(root, 'repo', 'sub'))}`);
+  assert.equal(fs.readFileSync(path.join(dir, taskOf(state, '默认').result), 'utf8').trim(), `cwd=${real(path.join(root, 'repo'))}`);
+  assert.equal(taskOf(state, '子目录').cwd, path.join(root, 'repo', 'sub'));
+  assert.equal(taskOf(state, '默认').cwd, undefined);
+  const saved = readJson(path.join(dir, 'plan.json'));
+  assert.equal(saved.phases[0].tasks[0].promptFile, undefined);
+  assert.equal(saved.phases[0].tasks[0].prompt, 'CWD\n共享背景');
+  assert.equal(saved.phases[0].tasks[0].cwd, path.join(root, 'repo', 'sub'));
+  // 引用的文件删掉后，不带计划续跑仍用存下的展开结果，全部复用
+  fs.rmSync(planDir, { recursive: true });
+  fs.writeFileSync(path.join(root, 'bin/codex'), '#!/bin/sh\nexit 99\n');
+  const resumed = command(['run', '--resume', state.runId], { env, timeout: 10000 });
+  assert.equal(resumed.status, 0, resumed.stdout + resumed.stderr);
+  assert.ok(readJson(statePath(dir)).tasks.every((t) => t.reused));
+});
+
+for (const [name, tasks, pattern] of [
+  ['引用不存在的任务', [{ label: 'x', prompt: '{{task:没有}}' }], /指向不存在的任务: 没有/],
+  ['引用所在阶段', [{ label: 'x', prompt: '{{phase:一}}' }], /不能等待自己/],
+  ['依赖成环', [{ label: 'x', after: ['y'], prompt: 'x' }, { label: 'y', after: ['x'], prompt: 'y' }], /依赖成环/],
+  ['after 不是数组', [{ label: 'x', after: 'y', prompt: 'x' }], /after 要写成/],
+  ['prompt 与 promptFile 同时写', [{ label: 'x', prompt: 'x', promptFile: 'x.md' }], /只能写一个/],
+  ['promptFile 读不到', [{ label: 'x', promptFile: '没有.md' }], /promptFile 读不到/],
+  ['cwd 不存在', [{ label: 'x', cwd: '没有', prompt: 'x' }], /cwd 不是目录/],
+]) test(`计划校验：${name}时拒绝启动`, () => {
+  const result = runPlan({ name: '校验', cwd: root, phases: [{ title: '一', tasks: tasks.map((t) => ({ ...sol, ...t })) }] });
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, pattern);
+  assert.deepEqual(fs.readdirSync(RUNS), []);
+});
+
+test('汇总给出每个任务的结论：schema 结果带判断与问题数，md 结果取第一段', () => {
+  const result = runPlan({ name: '结论', cwd: root, phases: [{ title: '一', tasks: [
+    { label: '审', ...sol, schema: 'review', prompt: 'JSON' },
+    { label: '写', ...sol, prompt: '写' },
+  ] }] });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /✓ 审 .*\n    pass_with_issues · 1 major, 2 minor\n    第一行结论\n    第二行结论\n/);
+  assert.match(result.stdout, /✓ 写 .*\n    假 flow 结果\n/);
+  assert.equal(fs.readFileSync(path.join(onlyRun().dir, 'summary.txt'), 'utf8'), result.stdout.slice(result.stdout.indexOf('[codex-flow] 结论 完成')));
 });
 
 test('自定义临时模型配置控制 run.sh 和 flow；缺失或损坏配置时均拒绝启动', () => {

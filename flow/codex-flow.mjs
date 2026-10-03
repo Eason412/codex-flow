@@ -54,6 +54,39 @@ function loadSchema(name) {
   return schema;
 }
 
+const expandHome = (p) => String(p).replace(/^~(?=$|[\/\\])/, os.homedir());
+
+// 读计划并展开：promptFile 和 {{file:路径}} 相对计划文件所在目录读进 prompt，plan.cwd 相对当前目录、任务 cwd 相对 plan.cwd 换成绝对路径。
+// 展开后的计划存进运行目录，续跑不再依赖这些文件；要读其他任务写出的文件，用 {{task:}} 或让 Codex 自己读
+function loadPlan(planFile) {
+  const plan = readJson(planFile);
+  if (!plan) die(`读不到计划: ${planFile}`);
+  const base = path.dirname(path.resolve(planFile));
+  const read = (p, what) => {
+    const file = path.resolve(base, expandHome(p));
+    try {
+      return fs.readFileSync(file, "utf8");
+    } catch {
+      die(`${what}读不到: ${file}`);
+    }
+  };
+  plan.cwd = path.resolve(expandHome(plan.cwd ?? process.cwd()));
+  for (const phase of Array.isArray(plan.phases) ? plan.phases : []) {
+    for (const task of Array.isArray(phase.tasks) ? phase.tasks : []) {
+      if (task.promptFile !== undefined) {
+        if (task.prompt !== undefined) die(`任务「${task.label}」的 prompt 和 promptFile 只能写一个`);
+        task.prompt = read(task.promptFile, `任务「${task.label}」的 promptFile `);
+        delete task.promptFile;
+      }
+      if (typeof task.prompt === "string") {
+        task.prompt = task.prompt.replace(/\{\{file:([^}]+)\}\}/g, (_, p) => read(p.trim(), `任务「${task.label}」引用的文件 `).trimEnd());
+      }
+      if (task.cwd !== undefined) task.cwd = path.resolve(plan.cwd, expandHome(task.cwd));
+    }
+  }
+  return plan;
+}
+
 function validatePlan(plan) {
   if (!plan || typeof plan.name !== "string" || !plan.name.trim()) die("计划缺少 name");
   if (!Array.isArray(plan.phases) || plan.phases.length === 0) die("计划缺少 phases");
@@ -69,8 +102,47 @@ function validatePlan(plan) {
       try { checkModelEffort(task.model, task.effort, task.label); } catch (error) { die(error.message); }
       if (typeof task.prompt !== "string" || !task.prompt.trim()) die(`任务「${task.label}」缺少 prompt`);
       if (task.schema) loadSchema(task.schema);
+      if (task.cwd !== undefined && !fs.statSync(task.cwd, { throwIfNoEntry: false })?.isDirectory()) die(`任务「${task.label}」的 cwd 不是目录: ${task.cwd}`);
+      if (task.after !== undefined && !(Array.isArray(task.after) && task.after.every((n) => typeof n === "string" && n.trim()))) {
+        die(`任务「${task.label}」的 after 要写成任务名或阶段标题的数组`);
+      }
     }
   }
+  return dependencies(plan);
+}
+
+// 每个任务等哪些任务：没写 after 就等上一阶段全部任务（阶段间顺序执行）；写了 after 就只等列出的任务或阶段，前置完成即开跑。
+// prompt 里 {{task:}} {{phase:}} 引用的任务自动加进来，保证引用到的结果已经出来
+function dependencies(plan) {
+  const byPhase = new Map(plan.phases.map((p) => [p.title, p.tasks.map((t) => t.label)]));
+  const labels = new Set(plan.phases.flatMap((p) => p.tasks.map((t) => t.label)));
+  const deps = new Map();
+  plan.phases.forEach((phase, index) => {
+    for (const task of phase.tasks) {
+      const set = new Set();
+      const add = (name, kind, how) => {
+        if (kind !== "phase" && labels.has(name)) set.add(name);
+        else if (kind !== "task" && byPhase.has(name)) for (const label of byPhase.get(name)) set.add(label);
+        else die(`任务「${task.label}」的 ${how} 指向不存在的${kind === "phase" ? "阶段" : kind === "task" ? "任务" : "任务或阶段"}: ${name}`);
+      };
+      if (task.after === undefined) for (const label of index > 0 ? byPhase.get(plan.phases[index - 1].title) : []) set.add(label);
+      else for (const name of task.after) add(name.trim(), null, "after");
+      for (const [, kind, name] of task.prompt.matchAll(/\{\{(task|phase):([^}]+)\}\}/g)) add(name.trim(), kind, `{{${kind}:}}`);
+      if (set.has(task.label)) die(`任务「${task.label}」不能等待自己（after 或引用指向了自己或所在阶段）`);
+      deps.set(task.label, [...set]);
+    }
+  });
+  // 依赖不能成环
+  const mark = new Map();
+  const visit = (label, trail) => {
+    if (mark.get(label) === "done") return;
+    if (mark.get(label) === "open") die(`任务依赖成环: ${[...trail, label].join(" → ")}`);
+    mark.set(label, "open");
+    for (const dep of deps.get(label)) visit(dep, [...trail, label]);
+    mark.set(label, "done");
+  };
+  for (const label of deps.keys()) visit(label, []);
+  return deps;
 }
 
 // {{phase:标题}} 换成该阶段所有任务的结果，{{task:任务名}} 换成单个任务的结果
@@ -261,20 +333,25 @@ async function runFlow(planFile, resumeId) {
     previous = readJson(statePath(dir));
     if (!previous) die(`找不到运行记录: ${resumeId}`);
     if (previous.status === "running" && isAlive(previous.pid)) die(`${resumeId} 还在运行`);
-    plan = planFile ? readJson(planFile) : readJson(path.join(dir, "plan.json"));
+    if (planFile) plan = loadPlan(planFile);
+    else {
+      // 运行目录里存的是展开后的计划，不再展开一次；旧计划的 cwd 可能缺失或是相对路径，用上次实际的工作目录
+      plan = readJson(path.join(dir, "plan.json"));
+      if (plan) plan.cwd = previous.cwd ?? path.resolve(plan.cwd ?? process.cwd());
+    }
   } else {
-    plan = readJson(planFile);
+    plan = loadPlan(planFile);
     dir = runDir(newRunId("r"));
   }
-  if (!plan) die(`读不到计划: ${planFile}`);
-  validatePlan(plan);
+  if (!plan) die(`读不到计划: ${planFile ?? path.join(dir, "plan.json")}`);
+  const deps = validatePlan(plan);
   fs.mkdirSync(path.join(dir, "results"), { recursive: true });
   fs.mkdirSync(path.join(dir, "logs"), { recursive: true });
   fs.mkdirSync(path.join(dir, "control"), { recursive: true });
   for (const name of fs.readdirSync(path.join(dir, "control"))) fs.rmSync(path.join(dir, "control", name), { force: true });
   writeJson(path.join(dir, "plan.json"), plan);
 
-  const cwd = plan.cwd ? path.resolve(plan.cwd) : process.cwd();
+  const cwd = plan.cwd;
   const state = {
     version: 1,
     kind: "flow",
@@ -290,41 +367,65 @@ async function runFlow(planFile, resumeId) {
     phases: plan.phases.map((p) => ({ title: p.title, status: "pending" })),
     tasks: [],
   };
-  // 续跑：已完成且没改过的任务复用结果；某个阶段有任务要重跑，后面阶段的任务都重跑，因为它们可能引用了前面的结果
-  let dirty = false;
-  for (const p of plan.phases) {
-    let phaseDirty = false;
-    for (const t of p.tasks) {
-      const old = previous?.tasks?.find((o) => o.label === t.label);
-      const reuse = !dirty && old && old.status === "completed" && old.hash === promptHash(t) && old.result && fs.existsSync(path.join(dir, old.result));
-      if (!reuse) phaseDirty = true;
-      state.tasks.push(reuse
-        ? { ...old, phase: p.title, reused: true }
-        : { label: t.label, phase: p.title, model: t.model, effort: t.effort, brief: t.brief || briefOf(t.prompt), hash: promptHash(t), status: "pending" });
+  // 续跑：已完成、prompt 与工作目录和前置任务都没变、前置任务也都复用的任务复用结果；
+  // 一个任务重跑，等它的任务都重跑，因为它们可能用到它的结果。旧记录没存前置任务时不比较前置
+  const planTasks = new Map(plan.phases.flatMap((p) => p.tasks.map((t) => [t.label, { ...t, phase: p.title }])));
+  const sameList = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+  const reusable = new Map();
+  const canReuse = (label) => {
+    if (!reusable.has(label)) {
+      const t = planTasks.get(label);
+      const old = previous?.tasks?.find((o) => o.label === label);
+      reusable.set(label, !!(old && old.status === "completed" && old.hash === promptHash(t) && old.result && fs.existsSync(path.join(dir, old.result))
+        && (old.cwd ?? previous.cwd) === (t.cwd ?? cwd) && (!old.needs || sameList(old.needs, deps.get(label))))
+        && deps.get(label).every(canReuse));
     }
-    dirty = dirty || phaseDirty;
+    return reusable.get(label);
+  };
+  for (const [label, t] of planTasks) {
+    const old = previous?.tasks?.find((o) => o.label === label);
+    state.tasks.push(canReuse(label)
+      ? { ...old, phase: t.phase, reused: true }
+      : { label, phase: t.phase, model: t.model, effort: t.effort, brief: t.brief || briefOf(t.prompt), hash: promptHash(t), status: "pending",
+          needs: deps.get(label), ...(t.schema ? { schema: t.schema } : {}), ...(t.cwd && t.cwd !== cwd ? { cwd: t.cwd } : {}) });
   }
   current = { dir, state };
   save();
   process.stdout.write(`[codex-flow] ${plan.name} 开始 · ${state.runId}\n`);
 
-  for (const [index, phasePlan] of plan.phases.entries()) {
-    const phase = state.phases[index];
-    phase.status = "running";
-    save();
-    const tasks = phasePlan.tasks.map((t) => [t, state.tasks.find((s) => s.label === t.label)]);
-    await Promise.all(tasks.map(([t, task]) =>
-      task.status === "completed" ? null : runTask(dir, state, task, renderPrompt(t.prompt, state, dir), cwd)));
-    const statuses = tasks.map(([, task]) => task.status);
-    phase.status = statuses.every((s) => s === "completed") ? "completed" : statuses.some((s) => s === "completed") ? "partial" : "failed";
-    save();
-    if (phase.status === "failed") {
-      // 一个阶段全军覆没就不往下跑了，后面的任务记为跳过
-      for (const later of state.phases.slice(index + 1)) later.status = "skipped";
-      for (const task of state.tasks) if (task.status === "pending") task.status = "skipped";
-      break;
-    }
-  }
+  // 前置任务都结束就开跑；前置任务一个都没完成时记为跳过，等它的任务随之跳过
+  const byLabel = new Map(state.tasks.map((t) => [t.label, t]));
+  const settled = (t) => ["completed", "failed", "cancelled", "skipped"].includes(t.status);
+  await new Promise((resolve) => {
+    const step = () => {
+      for (let changed = true; changed;) {
+        changed = false;
+        for (const task of state.tasks) {
+          if (task.status !== "pending") continue;
+          const before = deps.get(task.label).map((label) => byLabel.get(label));
+          if (!before.every(settled)) continue;
+          if (before.length && !before.some((t) => t.status === "completed")) {
+            task.status = "skipped";
+            task.error = "前置任务都没有完成";
+            changed = true;
+            continue;
+          }
+          const t = planTasks.get(task.label);
+          runTask(dir, state, task, renderPrompt(t.prompt, state, dir), t.cwd ?? cwd)
+            .catch((error) => {
+              task.status = "failed";
+              task.error = `执行出错：${error.message}`;
+              task.endedAt = nowIso();
+            })
+            .then(step);
+        }
+      }
+      for (const phase of state.phases) phase.status = phaseStatus(state.tasks.filter((t) => t.phase === phase.title));
+      save();
+      if (state.tasks.every(settled)) resolve();
+    };
+    step();
+  });
 
   state.status = overallStatus(state.tasks);
   state.endedAt = nowIso();
@@ -340,6 +441,17 @@ async function runFlow(planFile, resumeId) {
   process.exit(state.status === "completed" ? 0 : 1);
 }
 
+// 阶段只在有任务正在跑时算运行中；部分完成、其余还在等前置任务的算等待
+function phaseStatus(tasks) {
+  if (tasks.some((t) => t.status === "running")) return "running";
+  if (tasks.some((t) => t.status === "pending")) return "pending";
+  if (tasks.every((t) => t.status === "completed")) return "completed";
+  if (tasks.some((t) => t.status === "completed")) return "partial";
+  if (tasks.every((t) => t.status === "skipped")) return "skipped";
+  if (tasks.some((t) => t.status === "failed")) return "failed";
+  return "cancelled";
+}
+
 // 全部完成为 completed；有失败为 failed；其余（有任务被主动停掉）为 partial
 function overallStatus(tasks) {
   if (tasks.every((t) => t.status === "completed")) return "completed";
@@ -352,18 +464,71 @@ function overallStatus(tasks) {
 const GLYPH = { completed: "✓", failed: "✗", cancelled: "■", skipped: "○", pending: "○", running: "●", lost: "✗" };
 const WORD = { completed: "完成", partial: "部分完成", failed: "失败", cancelled: "已停止", running: "运行中", lost: "进程已消失" };
 
+// 汇总里每个任务附一段结论，多数情况不用再打开结果文件：
+// schema 结果取判断字段（verdict / status / confidence）、问题数和 summary / judgment，md 结果取正文第一段；最多三行
+const SEVERITY = ["critical", "major", "minor"];
+export function conclusionOf(dir, task) {
+  if (!task.result) return [];
+  let text;
+  try {
+    text = fs.readFileSync(path.join(dir, task.result), "utf8");
+  } catch {
+    return [];
+  }
+  const clip = (line) => (line.length > 160 ? `${line.slice(0, 159)}…` : line);
+  if (task.result.endsWith(".json")) {
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return [];
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+    const lines = (value) => (typeof value === "string" ? value.split("\n").map((l) => l.trim()).filter(Boolean) : []);
+    const head = [...lines(data.verdict ?? data.status), ...lines(data.confidence).map((c) => `confidence ${c}`)];
+    if (Array.isArray(data.findings)) {
+      const counts = SEVERITY.map((s) => [s, data.findings.filter((f) => f?.severity === s).length]).filter(([, n]) => n);
+      const other = data.findings.length - counts.reduce((n, [, c]) => n + c, 0);
+      if (other) counts.push(["其他", other]);
+      head.push(data.findings.length ? counts.map(([s, n]) => `${n} ${s}`).join(", ") : "无问题");
+    }
+    return [head.join(" · "), ...lines(data.summary ?? data.judgment)].filter(Boolean).slice(0, 3).map(clip);
+  }
+  // 跳过开头的标题行，取第一段
+  const paragraph = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) {
+      if (paragraph.length) break;
+      continue;
+    }
+    if (!paragraph.length && /^#{1,6}\s/.test(line)) continue;
+    paragraph.push(line);
+  }
+  return paragraph.slice(0, 3).map(clip);
+}
+
 function renderSummary(dir, state) {
   const status = effectiveStatus(state);
   const lines = [
     `[codex-flow] ${state.name} ${WORD[status] ?? status} · ${state.phases.length} 个阶段 · ${state.tasks.length} 个任务 · ${formatDuration(elapsedSeconds(state.startedAt, state.endedAt))}`,
   ];
-  const width = Math.max(...state.tasks.map((t) => t.label.length));
+  // 按终端显示宽度对齐，中文占两格
+  const cells = (text) => [...text].reduce((n, c) => n + (c.codePointAt(0) >= 0x2e80 ? 2 : 1), 0);
+  const width = Math.max(...state.tasks.map((t) => cells(t.label)));
   for (const t of state.tasks) {
     const time = t.startedAt ? formatDuration(elapsedSeconds(t.startedAt, t.endedAt)) : "-";
     let tail = t.result ? path.join(dir, t.result) : t.error ? t.error : t.status;
     if (t.reused) tail += "（复用上次结果）";
     if (t.actualModel && t.actualModel !== t.model) tail += `  ⚠ 实际模型 ${t.actualModel}`;
-    lines.push(`${GLYPH[t.status] ?? "?"} ${t.label.padEnd(width)}  ${t.model} ${t.effort}  ${time.padStart(6)}  ${tail}`);
+    lines.push(`${GLYPH[t.status] ?? "?"} ${t.label}${" ".repeat(width - cells(t.label))}  ${t.model} ${t.effort}  ${time.padStart(6)}  ${tail}`);
+    let conclusion = [];
+    try {
+      conclusion = conclusionOf(dir, t);
+    } catch {
+      // 结论取不出来只少这几行，不影响汇总
+    }
+    for (const line of conclusion) lines.push(`    ${line}`);
   }
   lines.push(`运行目录: ${dir}`);
   if (state.kind === "flow" && status !== "completed") lines.push(`续跑: node ${path.join(here, "codex-flow.mjs")} run --resume ${state.runId}`);

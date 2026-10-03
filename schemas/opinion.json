@@ -3,7 +3,7 @@
   "additionalProperties": false,
   "required": ["judgment", "confidence", "reasoning", "risks", "alternatives", "questions"],
   "properties": {
-    "judgment": {"type": "string"},
+    "judgment": {"type": "string", "description": "结论，三行以内"},
     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
     "reasoning": {"type": "array", "items": {"type": "string"}},
     "risks": {"type": "array", "items": {"type": "string"}},

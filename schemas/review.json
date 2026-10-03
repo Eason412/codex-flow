@@ -4,7 +4,7 @@
   "required": ["verdict", "summary", "findings", "open_questions"],
   "properties": {
     "verdict": {"type": "string", "enum": ["pass", "pass_with_issues", "fail"]},
-    "summary": {"type": "string"},
+    "summary": {"type": "string", "description": "结论，三行以内：整体判断和最需要处理的问题"},
     "findings": {
       "type": "array",
       "items": {
