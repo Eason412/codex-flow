@@ -20,9 +20,11 @@ const INIT_TIMEOUT_MS = 30000;
 const KILL_GRACE_MS = 2000;
 
 export class AppServer {
-  // initialize 被拒、超时或子进程提前退出时，先关掉子进程再抛错：调用方拿不到实例，不关就没人能关
-  static async start({ cwd, env = process.env, onNotification = () => {} }) {
+  // initialize 被拒、超时或子进程提前退出时，先关掉子进程再抛错：调用方拿不到实例，不关就没人能关。
+  // onSpawn 在子进程一起来就交出实例，启动中途收到停止信号时调用方也能关掉它
+  static async start({ cwd, env = process.env, onNotification = () => {}, onSpawn = () => {} }) {
     const server = new AppServer(cwd, env, onNotification);
+    onSpawn(server);
     const limit = Number(process.env.CODEX_FLOW_INIT_TIMEOUT_MS) || INIT_TIMEOUT_MS;
     let timer;
     try {

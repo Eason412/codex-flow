@@ -113,3 +113,32 @@ test('只带 runId 续跑时，计划引用的文件改过会提示仍用旧内�
   assert.match(resumed.stdout, /⚠ 计划引用的文件改过，这次仍用上次存下的内容；要用新内容就带计划文件续跑：.*ref\.md/);
   assert.match(resumed.stderr, /计划引用的文件改过/);
 });
+
+test('计划 cwd 不在 git 里、任务都在 git 仓库里时，续跑照常判断过期，不提示无法判断', () => {
+  const { repo } = gitRepo('repo', { 'a.md': '一\n' });
+  const plain = path.join(root, 'plain');
+  fs.mkdirSync(plain, { recursive: true });
+  const plan = { name: '混合', cwd: plain, phases: [{ title: '一', tasks: [{ label: '审', ...sol, cwd: repo, writes: [], prompt: '审' }] }] };
+  assert.equal(runPlan(plan).status, 0);
+  const { state } = lastRun();
+  assert.deepEqual(Object.keys(state.workspace), [fs.realpathSync(repo)]);
+  fs.writeFileSync(path.join(repo, 'a.md'), '二\n');
+  const resumed = resume(plan, state.runId);
+  assert.doesNotMatch(resumed.stdout, /无法判断/);
+  assert.equal(lastRun().state.tasks[0].reused, undefined);
+});
+
+test('--rerun=任务名 的写法同样生效；多余的位置参数和不认识的参数报错', () => {
+  const { repo } = gitRepo();
+  const plan = { name: '参数', cwd: repo, phases: [{ title: '一', tasks: [{ label: '甲', ...sol, prompt: '甲' }, { label: '乙', ...sol, prompt: '乙' }] }] };
+  assert.equal(runPlan(plan).status, 0);
+  const { state } = lastRun();
+  assert.equal(resume(plan, state.runId, ['--rerun=甲']).status, 0);
+  assert.deepEqual(reusedOf(lastRun().state), { 甲: false, 乙: true });
+  const extra = resume(plan, state.runId, ['--rerun', '甲', '乙']);
+  assert.equal(extra.status, 2);
+  assert.match(extra.stderr, /多余的参数: 乙/);
+  const unknown = resume(plan, state.runId, ['--rerum', '甲']);
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /不认识的参数: --rerum/);
+});

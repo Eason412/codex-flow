@@ -221,6 +221,13 @@ function scheduleTasks(dir, state, planTasks, deps) {
             changed = true;
             continue;
           }
+          // 排队或等前置期间被要求停止的任务不再开跑
+          if (fs.existsSync(path.join(dir, "control", `${fileSafe(task.label)}.stop`))) {
+            task.status = "cancelled";
+            task.error = "已按要求停止（未开始）";
+            changed = true;
+            continue;
+          }
           const t = planTasks.get(task.label);
           const taskCwd = t.cwd ?? cwd;
           // 写入范围和运行中的任务（或排队中的合回）重叠就先等着，前者结束时会再走到这里

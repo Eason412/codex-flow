@@ -60,18 +60,22 @@ export function conclusionOf(dir, task) {
     }
     return [head.join(" · "), ...lines(data.summary ?? data.judgment)].filter(Boolean).slice(0, 3).map(clip);
   }
-  // 跳过开头的标题行，取第一段
+  // 跳过开头的标题行，取第一段；整篇只有标题时用第一个标题
   const paragraph = [];
+  let heading = null;
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) {
       if (paragraph.length) break;
       continue;
     }
-    if (!paragraph.length && /^#{1,6}\s/.test(line)) continue;
+    if (!paragraph.length && /^#{1,6}\s/.test(line)) {
+      heading ??= line.replace(/^#{1,6}\s+/, "");
+      continue;
+    }
     paragraph.push(line);
   }
-  return paragraph.slice(0, 3).map(clip);
+  return (paragraph.length ? paragraph : heading ? [heading] : []).slice(0, 3).map(clip);
 }
 
 export function renderSummary(dir, state) {
@@ -85,12 +89,15 @@ export function renderSummary(dir, state) {
   for (const t of state.tasks) {
     const time = t.startedAt ? formatDuration(elapsedSeconds(t.startedAt, t.endedAt)) : "-";
     let tail = t.result ? path.join(dir, t.result) : t.error ? t.error : t.status;
+    // 有结果文件的失败任务，原因不在 tail 里，单独写一行
+    const reason = t.result && t.error && t.status !== "completed" ? t.error : null;
     if (t.reused) tail += "（复用上次结果）";
     if (t.actualModel && t.actualModel !== t.model) tail += `  ⚠ 实际模型 ${t.actualModel}`;
     if (t.serviceTier && t.actualServiceTier && t.actualServiceTier !== t.serviceTier) tail += `  ⚠ 请求 Fast，实际 tier ${t.actualServiceTier}`;
     const fast = (t.actualServiceTier ?? t.serviceTier) === "priority" ? " ⚡" : "";
     lines.push(`${GLYPH[t.status] ?? "?"} ${t.label}${" ".repeat(width - cells(t.label))}  ${t.model} ${t.effort}${fast}  ${time.padStart(6)}  ${tail}`);
     const list = (files) => (files.length > 5 ? `${files.slice(0, 5).join("、")} 等 ${files.length} 个` : files.join("、"));
+    if (reason) lines.push(`    ✗ ${reason}`);
     if (t.checkResults?.length && t.status === "completed") lines.push(`    验收 ${t.checkResults.length}/${t.checks?.length ?? t.checkResults.length} 通过`);
     if (t.scope?.outside?.length) lines.push(`    ⚠ 越界写入：${list(t.scope.outside)}`);
     if (t.scope?.unclaimed?.length) lines.push(`    ⚠ 范围外变动，来源未定${t.scope.duringChecks ? "（期间有其他任务在跑验收）" : ""}：${list(t.scope.unclaimed)}`);

@@ -1,5 +1,7 @@
 // 并行写入的排队与碰撞检测，任务说明计量、{{path:}} 引用和 stats 命令。
-import { root, sol, runPlan, lastRun, taskOf, gitRepo, command, writeJson, statePath, RUNS } from './helpers.mjs';
+import { root, sol, runPlan, lastRun, taskOf, gitRepo, command, writeJson, statePath, RUNS, background, fakePath, sleep } from './helpers.mjs';
+
+const lastRunOrNull = () => (fs.readdirSync(RUNS).some((n) => n.startsWith('r-2')) ? lastRun().state : null);
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -105,4 +107,35 @@ test('注入的上游结果超过 8000 字时汇总提示改用 {{path:}}；旧�
   const stats = command(['stats', 'r-old']);
   assert.equal(stats.status, 0, stats.stderr);
   assert.match(stats.stdout, /旧任务 .*说明 -/);
+});
+
+test('排队中的任务被要求停止时不再开跑；只有标题的结果用标题作结论；失败原因单独一行', async () => {
+  const { repo } = gitRepo();
+  const file = path.join(root, 'plan.json');
+  writeJson(file, { name: '停止排队', cwd: repo, phases: [{ title: '一', tasks: [
+    { label: '前', ...sol, writes: ['a'], checks: ['false'], prompt: 'SLOW' },
+    { label: '后', ...sol, writes: ['a'], prompt: '后' },
+  ] }] });
+  const flow = background(['run', file], fakePath({ FAKE_SLOW_MS: '1500' }));
+  // 「后」排在「前」后面：「前」开跑后写停止文件
+  for (let i = 0; i < 100 && taskOf(lastRunOrNull() ?? { tasks: [] }, '前')?.status !== 'running'; i++) await sleep(50);
+  const { dir } = lastRun();
+  assert.deepEqual(taskOf(lastRun().state, '后').waiting, ['前']);
+  assert.equal(command(['cancel', lastRun().state.runId, '后']).status, 0);
+  const result = await flow.done;
+  assert.equal(result.code, 1);
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+  assert.equal(taskOf(state, '后').status, 'cancelled');
+  assert.equal(taskOf(state, '后').startedAt, undefined);
+  assert.match(result.stdout, /✗ 前 .*\n    ✗ 验收未通过：false（exit 1）\n    假 flow 结果\n/);
+});
+
+test('结果只有标题时用标题作结论', () => {
+  const dir = path.join(RUNS, 'r-heading');
+  fs.mkdirSync(path.join(dir, 'results'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'results/甲.md'), '# 只有标题\n');
+  const base = { phase: '一', model: 'gpt-6.1-sol', effort: 'high', status: 'completed', startedAt: '2026-01-01T00:00:00Z', endedAt: '2026-01-01T00:01:00Z' };
+  writeJson(statePath(dir), { kind: 'flow', runId: 'r-heading', name: '标题', pid: 2147483647, cwd: root, status: 'completed', startedAt: base.startedAt, endedAt: base.endedAt,
+    phases: [{ title: '一', status: 'completed' }], tasks: [{ label: '甲', ...base, result: 'results/甲.md' }] });
+  assert.match(command(['status', 'r-heading']).stdout, /✓ 甲 .*\n    只有标题\n/);
 });

@@ -108,3 +108,13 @@ test('找不到 codex（spawn 失败）：任务失败并写明原因，run 正�
   assert.match(bad.error, /启动失败.*ENOENT/);
   assert.ok(readJson(path.join(lastRun().dir, 'state.json')));
 });
+
+test('启动中收到停止信号：卡在 initialize、不理会 stdin 结束和 SIGTERM 的子进程也被结束', () => withCleanup(async () => {
+  const flow = startFlow({ FAKE_INIT: 'silent', FAKE_IGNORE_EOF: '1', FAKE_IGNORE_TERM: '1' });
+  await waitFor(() => fs.existsSync(pidFile()), 8000, '假 app-server 写下 pid');
+  const pid = recordedPid();
+  flow.child.kill('SIGTERM');
+  const result = await finishWithin(flow, 8000);
+  assert.equal(result.code, 143);
+  await waitFor(() => !alive(pid), 1000, '子进程退出');
+}));

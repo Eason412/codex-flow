@@ -6,8 +6,8 @@ import { changedBetween, contentTree, gitRoot } from "./workspace.mjs";
 import { inScope, realPath } from "./scope.mjs";
 import { sha1 } from "./plan.mjs";
 
-// flow 用到的目录：flow 的 cwd 和各任务的 cwd
-export const flowCwds = (cwd, tasks) => [...new Set([cwd, ...tasks.map((t) => t.cwd ?? cwd)])];
+// flow 实际用到的目录：各任务的 cwd，没写的用 flow 的 cwd（任务都写了自己的 cwd 时，flow 的 cwd 不算）
+export const flowCwds = (cwd, tasks) => [...new Set(tasks.length ? tasks.map((t) => t.cwd ?? cwd) : [cwd])];
 
 // 运行结束（含被停止）时调用：仓库根 → 快照 tree；不在 git 里的目录记 null
 export function snapshotWorkspace(cwds) {

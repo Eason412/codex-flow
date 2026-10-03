@@ -90,7 +90,7 @@ function handleNotification(run, message) {
 
 async function startTurn(run) {
   const { cwd, task, prompt } = run;
-  run.server = await AppServer.start({ cwd, onNotification: (m) => handleNotification(run, m) });
+  run.server = await AppServer.start({ cwd, onNotification: (m) => handleNotification(run, m), onSpawn: (s) => servers.add(s) });
   const server = run.server;
   servers.add(server);
   const schema = loadSchema(task.schema);

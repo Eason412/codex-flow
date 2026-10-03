@@ -26,19 +26,29 @@ export { findRollout, readCompleteRecords, singleContext } from "./lib/rollout.m
 export { usageTokens, applyTokenRecords, singleWatchTick, watchSingle, settleSingleTokens } from "./lib/tokens.mjs";
 export { indentJson } from "./lib/single.mjs";
 
-// listFlags 里的参数可以重复，收集成数组；其余带值参数重复时取最后一个
+// listFlags 里的参数可以重复，收集成数组；其余带值参数重复时取最后一个。带值参数也可以写成 --名字=值
 function parseArgs(argv, valueFlags = [], listFlags = []) {
   const flags = {};
   const positionals = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      if (listFlags.includes(key)) (flags[key] ??= []).push(argv[++i]);
-      else if (valueFlags.includes(key)) flags[key] = argv[++i];
+      const eq = arg.indexOf("=");
+      const key = eq > 0 ? arg.slice(2, eq) : arg.slice(2);
+      const value = () => (eq > 0 ? arg.slice(eq + 1) : argv[++i]);
+      if (listFlags.includes(key)) (flags[key] ??= []).push(value());
+      else if (valueFlags.includes(key)) flags[key] = value();
       else flags[key] = true;
     } else positionals.push(arg);
   }
+  return { flags, positionals };
+}
+
+// 新命令和新参数写错时直接报错，不静默忽略
+function strict({ flags, positionals }, known, maxPositionals, usage) {
+  const unknown = Object.keys(flags).filter((k) => !known.includes(k));
+  if (unknown.length) die(`不认识的参数: ${unknown.map((k) => `--${k}`).join(" ")}。${usage}`);
+  if (positionals.length > maxPositionals) die(`多余的参数: ${positionals.slice(maxPositionals).join(" ")}。${usage}`);
   return { flags, positionals };
 }
 
@@ -48,8 +58,9 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
   const [command, ...rest] = process.argv.slice(2);
   switch (command) {
     case "run": {
-      const { flags, positionals } = parseArgs(rest, ["resume"], ["rerun"]);
-      if (!positionals[0] && !flags.resume) die("用法: run <plan.json> [--resume <runId>] [--rerun <任务名>]");
+      const usage = "用法: run <plan.json> [--resume <runId>] [--rerun <任务名>]";
+      const { flags, positionals } = strict(parseArgs(rest, ["resume"], ["rerun"]), ["resume", "rerun"], 1, usage);
+      if (!positionals[0] && !flags.resume) die(usage);
       if (flags.rerun?.some((label) => !label)) die("--rerun 后面要写任务名");
       fs.mkdirSync(RUNS, { recursive: true });
       process.on("SIGTERM", () => onStop("SIGTERM"));
@@ -62,7 +73,7 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
     case "cancel": cmdCancel(parseArgs(rest)); break;
     case "steer": cmdSteer(parseArgs(rest)); break;
     case "watch": await cmdWatch(parseArgs(rest, ["alert-after"])); break;
-    case "stats": cmdStats(parseArgs(rest)); break;
+    case "stats": cmdStats(strict(parseArgs(rest), ["json"], 1, "用法: stats <runId> [--json]")); break;
     case "_check": cmdCheck(parseArgs(rest, ["model", "effort", "label"])); break;
     case "_single-watch": await cmdSingleWatch(parseArgs(rest, ["dir"])); break;
     case "_single-start": cmdSingleStart(parseArgs(rest, SINGLE_FLAGS)); break;
