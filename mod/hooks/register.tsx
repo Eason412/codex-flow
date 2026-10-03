@@ -25,8 +25,8 @@ const RED = '#F7768E'
 const YELLOW = '#E0AF68'
 const BLUE = '#7AA2F7'
 const PURPLE = '#BB9AF7'
-// 运行中的阶段和 agent 前面转动的点阵，表示正在工作；只在有任务运行且面板显示时转
-const SPIN = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
+// 运行中的阶段和 agent 前面闪烁的星形（与 Claude Code 自己的 ✻ 指示一致），表示正在工作；只在有任务运行且面板显示时动
+const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢']
 const SPIN_MS = 120
 // 按类型区分：flow 紫色，单个 agent 蓝色；按钮文字上不了色，所以在名称前标类型
 const KIND: Record<FlowRun['kind'], [string, string]> = { flow: ['flow', PURPLE], single: ['agent', BLUE] }
@@ -62,7 +62,7 @@ const lostSince = new Map<string, number>()
 const instance = crypto.randomUUID()
 // 状态变更保持调用顺序；文件写入另排一条队列，不让慢写入阻塞后续状态变更。
 let panelChanges: Promise<void> = Promise.resolve()
-// 点阵动画的计时器：有任务在跑且面板显示时开，否则关
+// 星形动画的计时器：有任务在跑且面板显示时开，否则关
 let spinTimer: ReturnType<Engine['clock']['every']> | null = null
 let panelWrites: Promise<void> = Promise.resolve()
 let snapshot: PanelRecord['snapshot'] = null
