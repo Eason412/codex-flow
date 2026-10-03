@@ -616,6 +616,52 @@ test('失败的任务也报告越界；没生效的改文件记录不算', () =>
   assert.match(result.stdout, /✗ 败 .*\n    ⚠ 越界写入：z\/out\.md\n/);
 });
 
+test('过程记录：命令去掉 shell 外壳，改文件写相对路径，消息取首行，累计数随之增加', () => {
+  const result = runPlan({ name: '过程', cwd: root, phases: [{ title: '一', tasks: [{ label: '甲', ...sol, prompt: 'CMD PATCH:sub/out.md' }] }] });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const task = onlyRun().state.tasks[0];
+  assert.deepEqual(task.recent.map(({ kind, text, status }) => ({ kind, text, status })), [
+    { kind: 'cmd', text: 'echo "hi" && ls', status: 'done' },
+    { kind: 'edit', text: 'sub/out.md', status: undefined },
+    { kind: 'msg', text: '假 flow 结果', status: undefined },
+  ]);
+  assert.deepEqual(task.activity, { commands: 1, edits: 1, messages: 1 });
+  assert.equal(flow.shortCommand("/bin/bash -lc 'cat a  b'"), 'cat a b');
+  assert.equal(flow.shortCommand('ls -la'), 'ls -la');
+});
+
+test('验收期间任务带 checking 标记，结束后清掉', { timeout: 15000 }, async (t) => {
+  const file = path.join(root, 'plan.json');
+  writeJson(file, { name: '验收标记', cwd: root, phases: [{ title: '一', tasks: [{ label: '甲', ...sol, checks: ['sleep 1'], prompt: '甲' }] }] });
+  const { child, done } = background(process.execPath, [cli, 'run', file], fakePath());
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await done; } });
+  await until(() => fs.readdirSync(RUNS).some((name) => readJson(statePath(path.join(RUNS, name)))?.tasks?.[0]?.checking === true), '验收中标记');
+  const result = await done;
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const task = onlyRun().state.tasks[0];
+  assert.equal(task.status, 'completed');
+  assert.equal('checking' in task, false);
+});
+
+test('插话：送达后记入过程，被拒时记一条说明，控制文件都改名为 .sent', { timeout: 15000 }, async (t) => {
+  const file = path.join(root, 'plan.json');
+  writeJson(file, { name: '插话', cwd: root, phases: [{ title: '一', tasks: [{ label: '甲 乙', ...sol, prompt: 'SLOW' }] }] });
+  const { child, done } = background(process.execPath, [cli, 'run', file], { ...fakePath(), FAKE_SLOW_MS: '4000' });
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await done; } });
+  const dir = await until(() => fs.readdirSync(RUNS).map((name) => path.join(RUNS, name)).find((d) => readJson(statePath(d))?.tasks[0].turnId), '任务开始');
+  fs.writeFileSync(path.join(dir, 'control/甲_乙.steer.1.txt'), '补充一句');
+  await until(() => readJson(statePath(dir)).tasks[0].recent?.some((e) => e.kind === 'steer'), '插话送达');
+  fs.writeFileSync(path.join(dir, 'control/甲_乙.steer.2.txt'), 'REJECT 这句');
+  const result = await done;
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const recent = readJson(statePath(dir)).tasks[0].recent;
+  assert.deepEqual(recent.filter((e) => e.kind !== 'msg').map(({ kind, text }) => ({ kind, text })), [
+    { kind: 'steer', text: '补充一句' },
+    { kind: 'note', text: '插话没有送达：假插话被拒' },
+  ]);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'control')).sort(), ['甲_乙.steer.1.txt.sent', '甲_乙.steer.2.txt.sent']);
+});
+
 test('验收超时即失败，忽略 SIGTERM 的命令 3 秒后被强制结束；后台进程不拖住验收', { timeout: 30000 }, () => {
   const env = { ...fakePath(), CODEX_FLOW_CHECK_TIMEOUT: '1' };
   const t0 = Date.now();

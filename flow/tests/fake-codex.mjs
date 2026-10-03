@@ -11,11 +11,13 @@ if (args[0] === 'app-server') {
     const request = JSON.parse(line);
     if (request.id === undefined) return;
     let result = {};
+    // 插话里带 REJECT 时像 turn 已结束那样回错误
+    if (request.method === 'turn/steer' && JSON.stringify(request.params).includes('REJECT')) return send({ id: request.id, error: { code: -32600, message: '假插话被拒' } });
     if (request.method === 'thread/start') result = { thread: { id: 'fake-flow-thread' }, model: 'gpt-6.1-sol' };
     if (request.method === 'turn/start') result = { turn: { id: 'fake-flow-turn' } };
     send({ id: request.id, result });
     if (request.method === 'turn/start') {
-      // prompt 里的标记控制假结果：SLOW 慢 1.5 秒，FAIL 失败，CWD 回报工作目录，JSON 回 review 格式
+      // prompt 里的标记控制假结果：SLOW 慢 1.5 秒（FAKE_SLOW_MS 可改），FAIL 失败，CWD 回报工作目录，JSON 回 review 格式，CMD 先跑一条命令
       const prompt = request.params?.input?.[0]?.text ?? '';
       let text = '假 flow 结果';
       if (prompt.includes('CWD')) text = `cwd=${process.cwd()}`;
@@ -27,6 +29,11 @@ if (args[0] === 'app-server') {
         fs.writeFileSync(file, `写入 ${Date.now()}\n`);
         return file;
       };
+      if (prompt.includes('CMD')) {
+        const item = { type: 'commandExecution', id: 'cmd-1', command: '/bin/zsh -lc "echo \\"hi\\" && ls"' };
+        send({ method: 'item/started', params: { item: { ...item, status: 'inProgress' } } });
+        send({ method: 'item/completed', params: { item: { ...item, status: 'completed', exitCode: 0 } } });
+      }
       setTimeout(() => {
         for (const [, rel] of prompt.matchAll(/(?<!BAD)PATCH:(\S+)/g)) {
           send({ method: 'item/completed', params: { item: { type: 'fileChange', id: rel, status: 'completed', changes: [{ path: write(rel), kind: { type: 'add' }, diff: '' }] } } });
@@ -40,7 +47,7 @@ if (args[0] === 'app-server') {
         if (prompt.includes('FAIL')) return send({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: '假失败' } } } });
         send({ method: 'item/completed', params: { item: { type: 'agentMessage', text } } });
         send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
-      }, prompt.includes('SLOW') ? 1500 : 30);
+      }, prompt.includes('SLOW') ? Number(process.env.FAKE_SLOW_MS) || 1500 : 30);
     }
   });
 } else if (args[0] === 'exec') {

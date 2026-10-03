@@ -179,6 +179,41 @@ function save() {
   if (current) writeJson(statePath(current.dir), current.state);
 }
 
+// ---------- 过程记录（面板 agent 详情用） ----------
+
+const RECENT_LIMIT = 8;
+const oneLine = (text, limit = 200) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+
+// Codex 的命令都包在 shell -lc "…" 里，显示时去掉外壳
+export function shortCommand(command) {
+  const m = /^\S*sh -lc (['"])([\s\S]*)\1$/.exec(String(command ?? "").trim());
+  const inner = m ? (m[1] === '"' ? m[2].replace(/\\(["\\$`])/g, "$1") : m[2]) : command;
+  return oneLine(inner);
+}
+
+// 一条 app-server 通知对应的过程条目；推理、用户消息等不记
+export function activityOf(method, item, cwd) {
+  const id = typeof item.id === "string" ? item.id : undefined;
+  if (item.type === "commandExecution" && (method === "item/started" || method === "item/completed")) {
+    const failed = item.status === "failed" || item.status === "declined" || (typeof item.exitCode === "number" && item.exitCode !== 0);
+    return { id, kind: "cmd", text: shortCommand(item.command), status: method === "item/started" ? "running" : failed ? "failed" : "done" };
+  }
+  if (method !== "item/completed") return null;
+  if (item.type === "fileChange" && item.status === "completed") {
+    const files = (Array.isArray(item.changes) ? item.changes : []).map((c) => c?.path).filter((f) => typeof f === "string" && f);
+    // 两边都取真实路径再求相对路径：macOS 的 /var 与 /private/var 这类符号链接不会算成范围外
+    const base = realPath(cwd);
+    const shown = files.map((f) => {
+      const rel = path.relative(base, realPath(path.resolve(cwd, f)));
+      return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : f;
+    });
+    return { id, kind: "edit", text: oneLine(shown.join(", ")) };
+  }
+  if (item.type === "agentMessage") return { id, kind: "msg", text: oneLine(String(item.text ?? "").split("\n").find((l) => l.trim())) };
+  if (item.type === "webSearch") return { id, kind: "search", text: oneLine(item.query) };
+  return null;
+}
+
 // ---------- 写入范围与验收 ----------
 
 const CHECK_TIMEOUT = (Number(process.env.CODEX_FLOW_CHECK_TIMEOUT) > 0 ? Number(process.env.CODEX_FLOW_CHECK_TIMEOUT) : 600) * 1000;
@@ -392,6 +427,16 @@ async function runTask(dir, state, task, prompt, cwd) {
   const before = task.writes ? gitSnapshot(cwd) : null;
   const touched = new Set();
   touchedBy.set(task.label, touched);
+  // 面板的过程区：最近几步和累计数，随 token 一起每秒存一次
+  task.recent = [];
+  task.activity = { commands: 0, edits: 0, messages: 0 };
+  let dirty = false;
+  const note = (entry) => {
+    const old = entry.id ? task.recent.find((e) => e.id === entry.id) : null;
+    if (old) Object.assign(old, entry);
+    else task.recent = [...task.recent, entry].slice(-RECENT_LIMIT);
+    dirty = true;
+  };
   let lastMessage = null;
   let resolveTurn;
   const turnDone = new Promise((r) => (resolveTurn = r));
@@ -411,6 +456,15 @@ async function runTask(dir, state, task, prompt, cwd) {
         if (m.method === "thread/tokenUsage/updated") {
           const total = p.tokenUsage?.total?.totalTokens;
           if (typeof total === "number") task.tokens = total;
+        }
+        const step = activityOf(m.method, item, cwd);
+        if (step) {
+          if (m.method === "item/completed") {
+            if (item.type === "commandExecution") task.activity.commands++;
+            if (item.type === "fileChange" && item.status === "completed") task.activity.edits++;
+            if (item.type === "agentMessage") task.activity.messages++;
+          }
+          note(step);
         }
         if (m.method === "turn/completed") resolveTurn({ status: p.turn?.status, error: p.turn?.error?.message ?? null });
         if (m.method === "connection/closed") resolveTurn({ status: "failed", error: p.message });
@@ -455,8 +509,9 @@ async function runTask(dir, state, task, prompt, cwd) {
   // 每秒看一次控制目录：停止和插话由 /flow 面板或 cancel / steer 命令写进来；token 数变了也存一次，面板据此显示
   let savedTokens = task.tokens;
   const poll = setInterval(async () => {
-    if (task.tokens !== savedTokens) {
+    if (task.tokens !== savedTokens || dirty) {
       savedTokens = task.tokens;
+      dirty = false;
       save();
     }
     try {
@@ -471,11 +526,17 @@ async function runTask(dir, state, task, prompt, cwd) {
         const file = path.join(control, name);
         const text = fs.readFileSync(file, "utf8");
         fs.renameSync(file, `${file}.sent`);
-        await server.request("turn/steer", {
-          threadId: task.threadId, expectedTurnId: task.turnId,
-          input: [{ type: "text", text, text_elements: [] }],
-        });
+        try {
+          await server.request("turn/steer", {
+            threadId: task.threadId, expectedTurnId: task.turnId,
+            input: [{ type: "text", text, text_elements: [] }],
+          });
+        } catch (error) {
+          note({ kind: "note", text: `插话没有送达：${error.message}` });
+          throw error;
+        }
         log({ method: "steer-sent", chars: text.length });
+        note({ kind: "steer", text });
       }
     } catch (error) {
       log({ method: "control-error", error: error.message });
@@ -519,7 +580,14 @@ async function runTask(dir, state, task, prompt, cwd) {
 
 // 验收期间任务仍算运行中。没有验收命令就直接完成；验收失败保留结果，任务记为失败，续跑时只重跑验收
 async function finishChecks(dir, task, cwd, stopFile) {
-  const failure = task.checks?.length ? await runChecks(dir, task, cwd, stopFile) : null;
+  let failure = null;
+  if (task.checks?.length) {
+    // 面板据此写「验收中」、收起插话框：Codex 已经结束，插话送不到
+    task.checking = true;
+    save();
+    failure = await runChecks(dir, task, cwd, stopFile);
+    delete task.checking;
+  }
   task.checkFailed = !!failure && failure !== "stop";
   if (failure === "stop") {
     task.status = "cancelled";
