@@ -24,6 +24,7 @@ Current version: [V0.2.0](https://github.com/Eason412/codex-flow/releases/tag/V0
 - 🔍 **Verified models**: The model and effort in each report come from Codex's own session log, with ⚠ when they differ from the request or cannot be verified.
 - ⏱️ **15-minute check-ins**: Each time a task passes another 15 minutes, the mod asks Claude in the conversation to read the log and report. Tasks are never stopped automatically, and elapsed time alone never marks a task as stuck.
 - 🔒 **Model allowlist**: `models.json` lists the allowed models and efforts; any other request is refused before it starts.
+- ⚡ **Fast by model**: The `fast` list in `models.json` names the models that use Fast by default (currently only `gpt-6.1-sol`). Their tasks request `service_tier=priority`; other models never do. The panel and status line mark these models with a yellow ⚡.
 
 ## ⚙️ How it works
 
@@ -46,7 +47,7 @@ Claude Code main conversation
 | codex-flow mod | Task panel, `/flow` command, stopping and steering, 15-minute check-ins |
 | `statusline.mjs` | Called by ccstatusline; shows one progress line while the panel is hidden |
 | `SKILL.md` | Tells Claude when to delegate, which model to pick and how to investigate |
-| `models.json` | Allowed models and efforts |
+| `models.json` | Allowed models and efforts, and the models that use Fast by default |
 
 - **Display apart from execution**: The mod only displays and reminds; tasks keep running when it is not loaded.
 - **Run records**: Stored in `$HOME/.claude/codex-flow` by default (override with `CODEX_FLOW_HOME`) and kept for 7 days.
@@ -58,7 +59,7 @@ Claude Code main conversation
 
 - **Order**: With several tasks, each gets one row; flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends.
 - **Several tasks**: When a new task starts while you are viewing another, the panel stays where it is and the top edge of the frame says "另有 N 个任务" (N other tasks); press `b` (返回列表, back to list) to return to the list and pick another.
-- **Colors**: Flows are purple and single agents blue; the frame color follows the kinds of task in the list. The flow and agent counts in the list title use the same colors, and the top-right corner shows the token total across all tasks.
+- **Colors**: Flows are purple and single agents blue; the frame color follows the kinds of task in the list. The flow and agent counts in the list title use the same colors, and the top-right corner shows the token total across all tasks. Models running on Fast carry a yellow ⚡.
 - **Running marks**: Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻; running agents carry a spinning blue dot. When several phases run at once they all pulse, and the top edge of the frame reads 「N 个阶段并行」 (N phases in parallel).
 - **Frame**: The top edge carries the name, status, total tokens and total time; the bottom edge carries the key hints and buttons, so the frame costs no extra rows. When a long draft in the prompt squeezes the panel, the frame stays and the inner two-column box goes first.
 - **Fixed size**: The task list, the two-column flow view and the agent details all take the same 16 rows and the full width, so moving between levels changes only the layout, as in Claude Code's Workflow panel; when fewer rows are free above the prompt, the panel uses what is available.
@@ -100,6 +101,7 @@ Have an agent read [SETUP.md](SETUP.md) and follow its steps for installation, c
 | Setting | Location | Notes |
 | --- | --- | --- |
 | Allowed models and efforts | `models.json` | Other models and efforts are refused |
+| Models that use Fast by default | `fast` in `models.json` | Only models listed in `models`; omitted or empty means none |
 | Check-in interval | `CODEX_FLOW_ALERT_AFTER` in the `env` block of `~/.claude/settings.json` | Seconds, default 900 |
 | Run record location | `CODEX_FLOW_HOME` in the `env` block of `~/.claude/settings.json` | Default `~/.claude/codex-flow` |
 | Status line progress | ccstatusline custom-command | Command `node ~/.claude/skills/codex/flow/statusline.mjs`, with `preserveColors` on |
@@ -148,7 +150,7 @@ Run the `.mjs` commands with `node`; paths are relative to `~/.claude/skills/cod
 | [mod/](mod/) | Task panel mod and its tests |
 | [agents/codex-runner.md](agents/codex-runner.md) | Claude subagent that runs routine tasks in the background (Chinese) |
 | [schemas/](schemas/) | Built-in `review`, `opinion` and `result` reply formats |
-| [models.json](models.json) | Allowed models and efforts |
+| [models.json](models.json) | Allowed models and efforts, and the models that use Fast by default |
 
 ## 🤝 Contributing
 

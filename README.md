@@ -24,6 +24,7 @@
 - 🔍 **实际模型核实**：报告中的模型和 effort 取自 Codex 自己的会话记录，与请求不一致或无法核实时标出 ⚠。
 - ⏱️ **15 分钟排查提醒**：任务每运行满 15 分钟，mod 在对话中提醒 Claude 读日志并汇报；任务不会被自动停止，也不会只凭时长被判定为卡住。
 - 🔒 **模型白名单**：`models.json` 列出允许的模型和 effort，名单外的请求在启动前即被拒绝。
+- ⚡ **按模型默认 Fast**：`models.json` 的 `fast` 列出默认用 Fast 的模型（现在只有 `gpt-6.1-sol`），开跑时请求 `service_tier=priority`，其他模型不请求；面板和状态行在这些模型前标黄色 ⚡。
 
 ## ⚙️ 工作原理
 
@@ -46,7 +47,7 @@ Claude Code 主对话
 | codex-flow mod | 任务面板、`/flow` 命令、停止与插话、15 分钟提醒 |
 | `statusline.mjs` | 供 ccstatusline 调用，面板收起时显示一行进度 |
 | `SKILL.md` | 告诉 Claude 何时委派、选用哪个模型、如何排查 |
-| `models.json` | 允许的模型和 effort |
+| `models.json` | 允许的模型和 effort，默认用 Fast 的模型 |
 
 - **显示与运行分开**：mod 只负责显示和提醒；mod 未加载时，任务照常运行。
 - **运行记录**：默认在 `$HOME/.claude/codex-flow`，可用 `CODEX_FLOW_HOME` 改；保留 7 天。
@@ -58,7 +59,7 @@ Claude Code 主对话
 
 - **排列**：多个任务时一行一个，flow 排在单个 agent 上面，同类中新开始的在上；任务结束后位置不变。
 - **多个任务**：正在看某个任务时又有新任务开始，面板不跳走，外框上边写「另有 N 个任务」；按 `b`「返回列表」回到列表，再选另一个。
-- **颜色**：flow 紫色，单个 agent 蓝色，外框颜色随列表中的任务类型变化；列表标题里的「N 个 flow」「N 个 agent」同样上色，右上角是全部任务的 token 合计。
+- **颜色**：flow 紫色，单个 agent 蓝色，外框颜色随列表中的任务类型变化；列表标题里的「N 个 flow」「N 个 agent」同样上色，右上角是全部任务的 token 合计；用 Fast 的模型前面是黄色 ⚡。
 - **运行标记**：运行中的 flow 和阶段是闪烁的蓝色星形（与 Claude Code 的 ✻ 一致），agent 是转圈的蓝色细点阵；几个阶段同时运行时都会闪烁，外框上边写「N 个阶段并行」。
 - **外框**：上边写名称、状态、总 token 和总时长，下边放操作提示和按钮，不另占行；输入框草稿变长、面板变矮时外框仍在，先省去两栏的内框。
 - **固定大小**：任务列表、flow 两栏和 agent 详情占同样的 16 行和整块宽度，进出各层时只换布局、不跳，和 Claude Code 的 Workflow 面板一样；输入框上方放不下 16 行时按可用行数画。
@@ -100,6 +101,7 @@ Claude Code 主对话
 | 设置项 | 位置 | 说明 |
 | --- | --- | --- |
 | 允许的模型和 effort | `models.json` | 名单外的模型和 effort 直接拒绝 |
+| 默认用 Fast 的模型 | `models.json` 的 `fast` | 只能写 `models` 里有的；省略或留空时都不用 Fast |
 | 提醒间隔 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ALERT_AFTER` | 单位为秒，默认 900 |
 | 运行记录位置 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_HOME` | 默认 `~/.claude/codex-flow` |
 | 状态行进度 | ccstatusline 的 custom-command | 命令 `node ~/.claude/skills/codex/flow/statusline.mjs`，开启 `preserveColors` |
@@ -148,7 +150,7 @@ Claude Code 主对话
 | [mod/](mod/) | 任务面板 mod 及其测试 |
 | [agents/codex-runner.md](agents/codex-runner.md) | 在后台代跑常规任务的 Claude 子代理 |
 | [schemas/](schemas/) | 内置的 `review`、`opinion`、`result` 返回格式 |
-| [models.json](models.json) | 允许的模型和 effort |
+| [models.json](models.json) | 允许的模型和 effort，默认用 Fast 的模型 |
 
 ## 🤝 贡献须知
 

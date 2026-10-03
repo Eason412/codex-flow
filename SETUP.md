@@ -36,6 +36,8 @@ Success: `~/.claude/skills/codex/SKILL.md` exists and `~/.claude/skills/codex/ru
 
 [models.json](models.json) lists the models and efforts Codex may use; anything else is refused before a task starts. Show the user the current list and ask which models and efforts to allow. Only list models their Codex account can use.
 
+The optional `fast` list names the models whose tasks request Fast (`service_tier=priority`, about twice the speed at higher usage). Ask the user which models, if any, should use Fast by default; leave it empty when they want none.
+
 If the allowed models differ from the ones named in the "默认分工" table of [SKILL.md](SKILL.md), update that table to match, so Claude picks from the allowed list.
 
 Success, for each allowed model and effort:
