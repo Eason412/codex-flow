@@ -1417,8 +1417,8 @@ export const register: Register = on => {
         if (own) put(<Text dimColor>{own}</Text>, cells(own))
       }
       if (tailText()) put(<Text dimColor>{tailText()}</Text>, cells(tailText()))
-      // 摘要里没有可选项：提示文字说明原因；停止键只留阶段栏的「停止整个 flow」，免得停掉看不见的 agent
-      const compact: Foot = { hints: ['高度不够，只显示摘要'], stop: level === 'phases' ? stop : null, canBack: false }
+      // 摘要里没有可选项，不写操作提示（原因写在 README）；停止键只留阶段栏的「停止整个 flow」，免得停掉看不见的 agent
+      const compact: Foot = { hints: [], stop: level === 'phases' ? stop : null, canBack: false }
       return shell(PURPLE, lineWidth, head, <Box width={lineWidth}>{nodes}</Box>, 1, compact)
     }
     return shell(PURPLE, flowWidth, head, body, height + (framed ? 2 : 0), foot)

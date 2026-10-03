@@ -63,6 +63,7 @@ Claude Code main conversation
 - **Phase column**: Each row shows number, status, name, completed count and elapsed time; time and token columns reserve their maximum width so the layout does not shift as a run grows.
 - **Two-column selection**: Both columns are selectable at any time. The cursor walks the phases on the left before the agents on the right, the right column follows the phase under the cursor, and finished phases can be opened too.
 - **Long lists**: The panel shows as many rows as fit and pages through the rest with "N more" rows; it steps aside while you view a subagent's conversation.
+- **Little space**: When a prompt draft or Claude Code's task list leaves the panel a single content row, it shows a one-line summary instead: the current phase's progress, all of its agents, and their model and effort, with "+N" for agents that do not fit. Clearing the draft or hiding the task list with `ctrl+t` brings back the full panel.
 
 ![Agent detail: brief, progress and steer field](docs/images/panel-agent.png)
 
