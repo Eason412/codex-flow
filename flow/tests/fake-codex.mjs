@@ -23,7 +23,9 @@ if (args[0] === 'app-server') {
       let text = '假 flow 结果';
       if (prompt.includes('CWD')) text = `cwd=${process.cwd()}`;
       if (prompt.includes('JSON')) text = JSON.stringify({ verdict: 'pass_with_issues', summary: '第一行结论\n第二行结论', findings: [{ severity: 'major' }, { severity: 'minor' }, { severity: 'minor' }], open_questions: [] });
-      // PATCH:<路径> 像 apply_patch 一样写文件并发改文件记录，SHELL:<路径> 只写文件（像 shell 命令）
+      // PATCH:<路径> 像 apply_patch 一样写文件并发改文件记录，SHELL:<路径> 只写文件（像 shell 命令），
+      // EDIT:<路径>:<原文>:<新文> 只把文件里第一处原文换成新文并发改文件记录（测同一文件的不同段落），
+      // REPLACE:<路径> 把该路径（如指回主工作区的链接）删掉、换成含一个文件的真实目录；删链接只删链接本身
       const write = (rel) => {
         const file = path.resolve(process.cwd(), rel);
         fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -40,6 +42,18 @@ if (args[0] === 'app-server') {
           send({ method: 'item/completed', params: { item: { type: 'fileChange', id: rel, status: 'completed', changes: [{ path: write(rel), kind: { type: 'add' }, diff: '' }] } } });
         }
         for (const [, rel] of prompt.matchAll(/SHELL:(\S+)/g)) write(rel);
+        for (const [, rel, from, to] of prompt.matchAll(/EDIT:([^:\s]+):([^:\s]+):([^:\s]*)/g)) {
+          const file = path.resolve(process.cwd(), rel);
+          fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(from, to));
+          send({ method: 'item/completed', params: { item: { type: 'fileChange', id: rel, status: 'completed', changes: [{ path: file, kind: { type: 'update' }, diff: '' }] } } });
+        }
+        for (const [, rel] of prompt.matchAll(/REPLACE:(\S+)/g)) {
+          const file = path.resolve(process.cwd(), rel);
+          if (fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) fs.unlinkSync(file);
+          else fs.rmSync(file, { recursive: true, force: true });
+          fs.mkdirSync(file, { recursive: true });
+          fs.writeFileSync(path.join(file, 'real.txt'), '真实目录\n');
+        }
         // BADPATCH:<路径> 发一条没生效的改文件记录，不写文件
         for (const [, rel] of prompt.matchAll(/BADPATCH:(\S+)/g)) {
           send({ method: 'item/completed', params: { item: { type: 'fileChange', id: rel, status: 'failed', changes: [{ path: path.resolve(process.cwd(), rel), kind: { type: 'add' }, diff: '' }] } } });
