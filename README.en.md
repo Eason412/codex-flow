@@ -9,7 +9,7 @@
 - **Codex CLI**: OpenAI's command-line coding agent, which runs the tasks Claude dispatches.
 - **Mod**: a Claude Code plugin made of hook functions that can draw panels and register commands. The task panel in this project is a mod.
 
-Current version: 0.1.0 (unreleased). The app-server client follows the protocol usage of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) (Apache-2.0).
+Current version: [V0.1.0](https://github.com/Eason412/codex-flow/releases/tag/V0.1.0). The app-server client follows the protocol usage of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) (Apache-2.0).
 
 > ⚠️ **Requires a signed-in Codex CLI, Node.js, and a Claude Code build with mod support.** Codex runs with full access (no sandbox, no approvals) and edits files and runs commands directly.
 
