@@ -13,6 +13,7 @@ This manual is for AI coding agents (Claude Code and similar) that set up Codex 
 
 | Check | Command | Expected |
 | --- | --- | --- |
+| Operating system | `uname -s` | `Darwin` or `Linux`. On native Windows, stop and tell the user: the executor and panel need POSIX process groups and `ps`, `kill`, `pkill` |
 | Claude Code with mods | `claude plugin validate --help` | Usage text. An unknown-command error means this Claude Code build has no mod support |
 | Codex CLI | `codex --version` | A version. If missing, ask, then install per the [Codex repository](https://github.com/openai/codex) |
 | Codex sign-in | `codex login status` | `Logged in ...`. Otherwise ask the user to run `codex login` |
