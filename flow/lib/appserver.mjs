@@ -32,7 +32,7 @@ export class AppServer {
         timer = setTimeout(() => reject(new Error(`codex app-server 的 initialize 超过 ${limit / 1000} 秒没有回应`)), limit);
       });
       const init = server.request("initialize", {
-        clientInfo: { title: "codex-flow", name: "codex-flow", version: "0.2.0" },
+        clientInfo: { title: "codex-flow", name: "codex-flow", version: "0.3.0" },
         capabilities: { experimentalApi: false, requestAttestation: false, optOutNotificationMethods: OPT_OUT },
       }).catch((error) => {
         throw error.rpc ? new Error(`codex app-server 的 initialize 被拒：${error.message}`) : error;

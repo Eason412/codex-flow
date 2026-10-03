@@ -9,7 +9,7 @@
 - **Codex CLI**：OpenAI 的命令行编程智能体，本项目用它执行 Claude 派出的任务。
 - **mod**：Claude Code 的插件钩子模块，可以在界面上绘制面板、注册命令。本项目的任务面板是一个 mod。
 
-当前版本：[V0.2.0](https://github.com/Eason412/codex-flow/releases/tag/V0.2.0)（[全部版本与更新说明](https://github.com/Eason412/codex-flow/releases)）。app-server 客户端的协议用法参照 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)（Apache-2.0）。
+当前版本：[V0.3.0](https://github.com/Eason412/codex-flow/releases/tag/V0.3.0)（[全部版本与更新说明](https://github.com/Eason412/codex-flow/releases)）。app-server 客户端的协议用法参照 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)（Apache-2.0）。
 
 > ⚠️ **前提：macOS 或 Linux，本机需有已登录的 Codex CLI、Node.js 和支持 mod 的 Claude Code。** Codex 以完全权限运行（无沙箱、不审批），会直接修改文件和执行命令。
 
