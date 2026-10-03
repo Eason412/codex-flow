@@ -234,9 +234,12 @@ export async function runTask(dir, state, task, prompt, cwd) {
   } catch (error) {
     servers.delete(run.server);
     await run.server?.close();
-    task.status = "failed";
-    task.error = `启动失败：${error.message}`;
-    task.failureKind = "execution";
+    // 被整个停掉时 onStop 已记为已停止，关 app-server 引起的启动失败不覆盖它
+    if (task.status !== "cancelled") {
+      task.status = "failed";
+      task.error = `启动失败：${error.message}`;
+      task.failureKind = "execution";
+    }
     if (run.iso) closeWorktree(task, run.iso);
     task.endedAt = nowIso();
     run.log({ method: "start-failed", error: error.message });

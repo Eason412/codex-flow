@@ -25,6 +25,9 @@ export function overallStatus(tasks) {
   return "partial";
 }
 
+// 隔离任务这几类失败的原因由 isolationLines 写出，不再另起一行
+const SELF_EXPLAINED = ["conflict", "mismatch", "interrupted", "merge", "archive"];
+
 // 注入的上游结果超过这个字数就提示改用 {{path:}}：大段结果塞进任务说明会挤占上下文
 const INJECT_WARN = 8000;
 
@@ -91,7 +94,7 @@ export function renderSummary(dir, state) {
     const time = t.startedAt ? formatDuration(elapsedSeconds(t.startedAt, t.endedAt)) : "-";
     let tail = t.result ? path.join(dir, t.result) : t.error ? t.error : t.status;
     // 有结果文件的失败任务，原因不在 tail 里，单独写一行
-    const reason = t.result && t.error && t.status !== "completed" ? t.error : null;
+    const reason = t.result && t.error && t.status !== "completed" && !(t.isolation === "worktree" && SELF_EXPLAINED.includes(t.failureKind)) ? t.error : null;
     if (t.reused) tail += "（复用上次结果）";
     if (t.actualModel && t.actualModel !== t.model) tail += `  ⚠ 实际模型 ${t.actualModel}`;
     if (t.serviceTier && t.actualServiceTier && t.actualServiceTier !== t.serviceTier) tail += `  ⚠ 请求 Fast，实际 tier ${t.actualServiceTier}`;

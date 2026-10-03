@@ -96,9 +96,14 @@ export function validatePlan(plan) {
 
 // 计划顶层的 isolation 作为任务默认值展开到任务上；非 git 目录、有已初始化子模块的仓库拒绝启动
 function checkIsolation(plan, task) {
+  // 计划顶层写了 isolation 时，任务写 false 表示这个任务不隔离
+  if (task.isolation === false) {
+    delete task.isolation;
+    return;
+  }
   if (task.isolation === undefined && plan.isolation !== undefined) task.isolation = plan.isolation;
   if (task.isolation === undefined) return;
-  if (task.isolation !== "worktree") die(`任务「${task.label}」的 isolation 只能写 "worktree"`);
+  if (task.isolation !== "worktree") die(`任务「${task.label}」的 isolation 只能写 "worktree" 或 false`);
   if (task.keepWorktree !== undefined && typeof task.keepWorktree !== "boolean") die(`任务「${task.label}」的 keepWorktree 要写成 true 或 false`);
   const blocker = isolationBlocker(task.cwd ?? plan.cwd);
   if (blocker) die(`任务「${task.label}」写了 isolation，但${blocker}`);

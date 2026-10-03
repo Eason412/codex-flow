@@ -83,7 +83,7 @@ test('有范围外改动：整份成果不合回、不验收，任务失败并�
   assert.deepEqual(refsOf(repo), [base, result]);
   assert.equal(t.merge.result.ref, result);
   assert.equal(gitOut(repo, 'diff', '--name-only', base, result), 'a/new.md\nz/out.md\n');
-  assert.ok(r.stdout.includes(`⚠ 成果没合回（改动超出写入范围）；查看：git -C ${repo} diff ${base} ${result}；取回成目录：git -C ${repo} worktree add --detach <目录> ${result}`), r.stdout);
+  assert.ok(r.stdout.includes(`⚠ 成果没合回（改动超出写入范围）\n    查看：git -C ${repo} diff ${base} ${result}\n    取回成目录：git -C ${repo} worktree add --detach <目录> ${result}\n`), r.stdout);
 });
 
 test('keepWorktree：失败时保留 worktree 目录并解锁', () => {
@@ -96,7 +96,7 @@ test('keepWorktree：失败时保留 worktree 目录并解锁', () => {
   assert.ok(exists(t.worktree.path, 'a.md'));
   const entry = worktrees(repo).split('\n\n').find((e) => e.includes(t.worktree.path));
   assert.ok(entry && !entry.includes('locked'), '保留的 worktree 已解锁');
-  assert.match(r.stdout, /⚠ 成果没合回（验收没过）；worktree 保留在 .*甲；查看：/);
+  assert.match(r.stdout, /⚠ 成果没合回（验收没过）；worktree 保留在 .*甲\n    查看：/);
 });
 
 test('环境目录：只给 node_modules、.venv、venv 建链接，其余被忽略的不放进 worktree；.worktreeinclude 列出且被忽略的文件复制进来；本地包指向主工作区时告警', () => {
@@ -198,15 +198,15 @@ test('同一处冲突：后合回的整份不合回、任务失败，写明冲�
   assert.equal(t.status, 'failed');
   assert.equal(t.failureKind, 'conflict');
   assert.deepEqual(t.merge.conflict, ['f.txt']);
-  assert.ok(t.error.startsWith(`合回冲突：f.txt（同期改过：甲）；整份成果没合回。查看：git -C ${repo} diff ${prefix}/base ${prefix}/result；`), t.error);
-  assert.ok(t.error.endsWith(`；在最新状态上重做：run --resume ${state.runId} --rerun 乙`), t.error);
+  assert.ok(t.error.startsWith(`合回冲突：f.txt（同期改过：甲）；整份成果没合回\n查看：git -C ${repo} diff ${prefix}/base ${prefix}/result\n`), t.error);
+  assert.ok(t.error.endsWith(`\n在最新状态上重做：run --resume ${state.runId} --rerun 乙`), t.error);
   assert.match(read(repo, 'f.txt'), /^甲改$/m);
   assert.equal(exists(repo, 'g.txt'), false, '整份不合回');
   assert.equal(git('diff', '--cached', '--name-only'), '');
   assert.deepEqual(refsOf(repo), [`${prefix}/base`, `${prefix}/before`, `${prefix}/result`]);
   assert.match(git('show', `${prefix}/result:f.txt`), /^乙改$/m);
   assert.equal(exists(WT, state.runId, '乙'), false, '没写 keepWorktree：目录删掉，成果在引用里');
-  assert.ok(r.stdout.includes(`    ⚠ ${t.error}\n`));
+  assert.ok(r.stdout.includes(`    ⚠ ${t.error.replaceAll("\n", "\n    ")}\n`), r.stdout);
 
   // 续跑：甲复用，乙从最新的主工作区重建 worktree 重做；第 2 段已是甲改，乙这次只写出 g.txt
   const again = runPlan(plan(repo, tasks), ['--resume', state.runId]);
@@ -282,8 +282,8 @@ test('续跑遇到上次合回中断（applying）的任务：不复用、不重
   assert.equal(after.status, 'failed');
   assert.equal(after.failureKind, 'interrupted');
   assert.equal(after.startedAt, t.startedAt, '没有重跑');
-  assert.equal(after.error, `上次合回中断，需人工核对主工作区；查看：git -C ${repo} diff refs/x/before refs/x/merged`);
-  assert.match(r.stdout, /⚠ 合回中断，主工作区可能只应用了一部分，需人工核对；查看：git -C .* diff refs\/x\/before refs\/x\/merged/);
+  assert.equal(after.error, `上次合回中断，需人工核对主工作区\n查看：git -C ${repo} diff refs/x/before refs/x/merged`);
+  assert.match(r.stdout, /⚠ 合回中断，主工作区可能只应用了一部分，需人工核对\n    查看：git -C .* diff refs\/x\/before refs\/x\/merged/);
 });
 
 test('被停止：运行期间 worktree 锁住；停止后成果存进引用、worktree 删掉，不合回', async () => {
@@ -306,7 +306,7 @@ test('被停止：运行期间 worktree 锁住；停止后成果存进引用、w
   const { code, stdout } = await done;
   assert.equal(code, 143);
   const t = readJson(statePath(dir)).tasks[0];
-  assert.ok(stdout.includes(`⚠ 成果没合回（已停止）；查看：git -C ${repo} diff ${t.merge.base.ref} ${t.merge.result.ref}`), stdout);
+  assert.ok(stdout.includes(`⚠ 成果没合回（已停止）\n    查看：git -C ${repo} diff ${t.merge.base.ref} ${t.merge.result.ref}\n`), stdout);
   assert.ok(!stdout.includes('worktree 保留在'), '停止时打印的汇总与收尾后的去留一致');
   assert.equal(t.status, 'cancelled');
   assert.equal(t.worktree, undefined);

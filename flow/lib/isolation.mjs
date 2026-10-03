@@ -23,19 +23,20 @@ const nameOf = (label) => label.replace(/[^\p{L}\p{N}_-]+/gu, "_");
 // 任务记为失败并写明原因和类别，返回 false 方便直接 return
 const fail = (task, failureKind, error) => !Object.assign(task, { status: "failed", failureKind, error });
 
-// 运行中的隔离任务：进程退出（含被停止）时补存成果、收尾，再存一次状态
+// 运行中的隔离任务：被停止时（onStop 在打印汇总前调用 closeActive）和进程退出时补存成果、收尾，再存一次状态
 const active = new Set();
-process.on("exit", () => {
+export function closeActive() {
   if (!active.size) return;
   for (const iso of [...active]) {
     try {
       closeWorktree(iso.task, iso);
     } catch {
-      // 退出时收尾失败也不影响退出
+      // 收尾失败也不影响停止
     }
   }
   save();
-});
+}
+process.on("exit", closeActive);
 
 // 能否隔离：只支持 git，仓库里有已初始化的子模块时第一版不支持。能隔离返回 null，否则返回原因
 export function isolationBlocker(cwd) {
@@ -166,7 +167,8 @@ function archiveResult(task, iso) {
 
 // 相对仓库根的路径换成相对任务 cwd 的显示形式，和 scope.outside 一致
 const shown = (iso, rel) => path.relative(realPath(iso.cwd), path.join(iso.root, rel)) || ".";
-const viewOf = (m) => `查看：git -C ${m.repo} diff ${m.base.ref} ${m.result.ref}；取回成目录：git -C ${m.repo} worktree add --detach <目录> ${m.result.ref}`;
+// 命令各占一行，整行复制就能运行
+const viewOf = (m) => `查看：git -C ${m.repo} diff ${m.base.ref} ${m.result.ref}\n取回成目录：git -C ${m.repo} worktree add --detach <目录> ${m.result.ref}`;
 
 // Codex 正常结束、验收之前：存成果，核对写入范围和受管链接。越界、链接异常或存不下成果时整份不合回、任务失败，不再验收。
 // 返回能否进入验收。验收命令的产物不算任务的改动：结束快照在验收前拍
@@ -219,8 +221,8 @@ function relatedTasks(task, files) {
 function conflictOf(task, iso, files) {
   const related = relatedTasks(task, files.map((rel) => path.join(iso.root, rel)));
   task.merge.conflict = files.map((rel) => shown(iso, rel)).sort();
-  return { kind: "conflict", error: `合回冲突：${list(task.merge.conflict)}${related.length ? `（同期改过：${related.join("、")}）` : ""}；整份成果没合回。`
-    + `${viewOf(task.merge)}；在最新状态上重做：run --resume ${iso.runId} --rerun ${task.label}` };
+  return { kind: "conflict", error: `合回冲突：${list(task.merge.conflict)}${related.length ? `（同期改过：${related.join("、")}）` : ""}；整份成果没合回\n`
+    + `${viewOf(task.merge)}\n在最新状态上重做：run --resume ${iso.runId} --rerun ${task.label}` };
 }
 
 // 应用后核对：主工作区里 M→R 涉及的文件现在应与 R 一致；返回不一致的文件
@@ -264,7 +266,7 @@ function applyMerge(task, iso) {
     return conflictOf(task, iso, iso.changed);
   }
   const off = mismatched(iso, main, result);
-  if (off.length) return { kind: "mismatch", error: `合回后主工作区与合并结果不一致：${list(off)}；需人工核对。查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` };
+  if (off.length) return { kind: "mismatch", error: `合回后主工作区与合并结果不一致：${list(off)}；需人工核对\n查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` };
   return { result };
 }
 
@@ -275,22 +277,27 @@ export async function mergeBack(dir, task, iso, recheck) {
   const m = task.merge;
   m.files = iso.changed.map((rel) => shown(iso, rel)).sort();
   let result = null;
+  // 租约从合回一直持有到主工作区再验收结束：验收看到的必须正是合回后的内容，排队的任务这期间不能开跑
+  let release = () => {};
   if (iso.changed.length) {
     task.merging = true;
     save();
     const abs = iso.changed.map((rel) => path.join(iso.root, rel));
     const name = `${task.label}:合回`;
     await leases.acquire(name, leaseOf(abs, iso.root));
+    release = () => leases.release(name);
     let outcome;
     try {
       outcome = applyMerge(task, iso);
     } catch (error) {
       outcome = { kind: m.state === "applying" ? "interrupted" : "merge", error: error.message };
     } finally {
-      leases.release(name);
       delete task.merging;
     }
-    if (outcome.error) return fail(task, outcome.kind, outcome.error);
+    if (outcome.error) {
+      release();
+      return fail(task, outcome.kind, outcome.error);
+    }
     // 合回的文件登记成这个任务写的，同期其他任务核对范围外变动、找冲突来源时认得出
     if (!touchedBy.has(task.label)) touchedBy.set(task.label, new Set());
     for (const file of abs) touchedBy.get(task.label).add(file);
@@ -305,10 +312,15 @@ export async function mergeBack(dir, task, iso, recheck) {
   if (task.checks?.length && result && result !== iso.end) {
     m.rechecked = true;
     save();
-    await recheck();
+    try {
+      await recheck();
+    } finally {
+      release();
+    }
     if (task.status === "failed") task.error = `合回后在主工作区${task.error}`;
     return;
   }
+  release();
   task.status = "completed";
   delete task.error;
   delete task.failureKind;
@@ -317,7 +329,7 @@ export async function mergeBack(dir, task, iso, recheck) {
 // 续跑遇到上次合回写主工作区时中断（merge.state 仍是 applying）的任务：不复用、不自动重试、不反向应用，记为失败等人工核对
 export function interruptedMerge(old, phase) {
   const m = old.merge;
-  const view = m.before && m.merged ? `；查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` : "";
+  const view = m.before && m.merged ? `\n查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` : "";
   return { ...old, phase, status: "failed", failureKind: "interrupted", error: `上次合回中断，需人工核对主工作区${view}` };
 }
 
@@ -329,21 +341,19 @@ export function isolationLines(task) {
   const lines = [];
   if (task.envToMain?.length) lines.push(`⚠ 环境里的本地包指向主工作区，验收可能测的不是隔离里的代码：${list(task.envToMain)}`);
   if (["pending", "running"].includes(task.status)) return lines;
-  const m = { ...task.merge };
-  // 被整个停掉时汇总在收尾之前打印：worktree 去留按 closeWorktree 的规则推断，result 引用名由 base 推出
-  const stopping = task.status === "cancelled" && task.worktree && !m.archiveError;
-  const keep = stopping ? task.keepWorktree || m.state === "applying" : !!task.worktree;
-  const kept = keep ? `worktree 保留在 ${task.worktree.path}；` : "";
-  if (stopping && !m.result && m.base) m.result = { ref: m.base.ref.replace(/\/base$/, "/result") };
-  if (m.state === "applying") lines.push(`⚠ 合回中断，主工作区可能只应用了一部分，需人工核对；${kept}${m.before && m.merged ? `查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` : ""}`);
+  const m = task.merge ?? {};
+  const kept = task.worktree ? `worktree 保留在 ${task.worktree.path}` : "";
+  // 多行的说明（命令各占一行）拆开，每行由汇总统一缩进
+  const push = (text) => lines.push(...text.split("\n").filter(Boolean));
+  if (m.state === "applying") push(`⚠ 合回中断，主工作区可能只应用了一部分，需人工核对${kept ? `；${kept}` : ""}${m.before && m.merged ? `\n查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` : ""}`);
   else if (m.state === "applied") {
     const recheck = m.rechecked ? `，已在主工作区重新验收${task.status === "failed" && task.checkFailed ? "（未通过）" : ""}` : "";
     lines.push(m.files?.length ? `合回 ${m.files.length} 个文件${recheck}` : "没有改动，无需合回");
-  } else if (["conflict", "mismatch", "interrupted"].includes(task.failureKind)) lines.push(`⚠ ${kept}${task.error}`);
+  } else if (["conflict", "mismatch", "interrupted"].includes(task.failureKind)) push(`⚠ ${task.error}${kept ? `\n${kept}` : ""}`);
   else if (m.result || kept) {
     const why = task.status === "cancelled" ? "已停止" : ["merge", "archive"].includes(task.failureKind) ? task.error
       : `${WHY[task.failureKind] ?? "任务没完成"}${task.failureKind === "anomaly" ? `：${list(m.anomalies)}` : ""}`;
-    lines.push(`⚠ 成果没合回（${why}）；${kept}${m.result ? viewOf(m) : ""}`.replace(/；$/, ""));
+    push(`⚠ 成果没合回（${why}）${kept ? `；${kept}` : ""}${m.result ? `\n${viewOf(m)}` : ""}`);
   }
   return lines;
 }

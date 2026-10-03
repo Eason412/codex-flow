@@ -12,7 +12,7 @@ import { changedSources, changesSince, flowCwds, snapshotWorkspace, staleFiles }
 import { measureInput, meterReport } from "./meter.mjs";
 import { recordCollisions } from "./collisions.mjs";
 import { runTask } from "./task.mjs";
-import { cleanRunArchives, interruptedMerge, isolationFields } from "./isolation.mjs";
+import { cleanRunArchives, closeActive, interruptedMerge, isolationFields } from "./isolation.mjs";
 import { overallStatus, phaseStatus, renderSummary } from "./summary.mjs";
 
 let stopping = false;
@@ -41,6 +41,8 @@ export async function onStop(signal) {
   save();
   // 等 app-server 子进程真正退出（不理会 SIGTERM 的会被强制结束），最多等 3 秒
   await Promise.race([Promise.all([...servers].map((server) => server.close())), new Promise((r) => setTimeout(r, 3000))]);
+  // Codex 都停了再收尾隔离任务（存成果、删目录），汇总写的是收尾后的实际去留
+  closeActive();
   const summary = renderSummary(current.dir, state);
   fs.writeFileSync(path.join(current.dir, "summary.txt"), summary);
   process.stdout.write(summary);
@@ -249,6 +251,7 @@ function scheduleTasks(dir, state, planTasks, deps) {
           if (isolated) worktrees++;
           (task.recheck ? recheckTask(dir, task, taskCwd) : runTask(dir, state, task, promptFor(dir, state, task, t), taskCwd))
             .catch((error) => {
+              if (task.status === "cancelled") return;
               task.status = "failed";
               task.error = `执行出错：${error.message}`;
               task.endedAt = nowIso();
@@ -283,6 +286,8 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   for (const line of [...overlapNotes(toRun, deps), ...notes]) process.stderr.write(`[codex-flow] ${line}\n`);
 
   await scheduleTasks(dir, state, planTasks, deps);
+  // 停止中关 app-server 会让启动中的任务提前结束，由 onStop 收尾和退出
+  if (stopping) return new Promise(() => {});
   state.status = overallStatus(state.tasks);
   state.endedAt = nowIso();
   try {
