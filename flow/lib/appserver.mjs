@@ -13,13 +13,35 @@ const OPT_OUT = [
   "item/fileChange/outputDelta",
 ];
 
+// initialize 的等待上限：真实 Codex 冷启动（读配置、起内置服务）通常几秒内回应，30 秒还没回应就是卡死；
+// 取得比慢机器的冷启动长，宁可晚报也不误杀。测试用 CODEX_FLOW_INIT_TIMEOUT_MS 改小
+const INIT_TIMEOUT_MS = 30000;
+// SIGTERM 之后等子进程自己退出的时间，到点还在就 SIGKILL
+const KILL_GRACE_MS = 2000;
+
 export class AppServer {
+  // initialize 被拒、超时或子进程提前退出时，先关掉子进程再抛错：调用方拿不到实例，不关就没人能关
   static async start({ cwd, env = process.env, onNotification = () => {} }) {
     const server = new AppServer(cwd, env, onNotification);
-    await server.request("initialize", {
-      clientInfo: { title: "codex-flow", name: "codex-flow", version: "0.2.0" },
-      capabilities: { experimentalApi: false, requestAttestation: false, optOutNotificationMethods: OPT_OUT },
-    });
+    const limit = Number(process.env.CODEX_FLOW_INIT_TIMEOUT_MS) || INIT_TIMEOUT_MS;
+    let timer;
+    try {
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`codex app-server 的 initialize 超过 ${limit / 1000} 秒没有回应`)), limit);
+      });
+      const init = server.request("initialize", {
+        clientInfo: { title: "codex-flow", name: "codex-flow", version: "0.2.0" },
+        capabilities: { experimentalApi: false, requestAttestation: false, optOutNotificationMethods: OPT_OUT },
+      }).catch((error) => {
+        throw error.rpc ? new Error(`codex app-server 的 initialize 被拒：${error.message}`) : error;
+      });
+      await Promise.race([init, timeout]);
+    } catch (error) {
+      await server.close();
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     server.notify("initialized", {});
     return server;
   }
@@ -37,6 +59,12 @@ export class AppServer {
       this.stderr = (this.stderr + chunk).slice(-4000);
     });
     this.proc.on("error", (error) => this.fail(error));
+    // 子进程已死时再写 stdin 会报 EPIPE，由 exit / error 事件统一处理，这里不让它变成未捕获异常
+    this.proc.stdin.on("error", () => {});
+    this.exited = new Promise((resolve) => {
+      this.proc.on("exit", resolve);
+      this.proc.on("error", resolve); // spawn 失败时不会有 exit
+    });
     this.proc.on("exit", (code, signal) => {
       this.fail(new Error(`codex app-server 退出了（${signal ? `signal ${signal}` : `exit ${code}`}）${this.stderr.trim() ? `：${this.stderr.trim().slice(-500)}` : ""}`));
     });
@@ -60,7 +88,7 @@ export class AppServer {
       const waiter = this.pending.get(message.id);
       if (!waiter) return;
       this.pending.delete(message.id);
-      if (message.error) waiter.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
+      if (message.error) waiter.reject(Object.assign(new Error(message.error.message ?? JSON.stringify(message.error)), { rpc: true }));
       else waiter.resolve(message.result);
       return;
     }
@@ -85,18 +113,28 @@ export class AppServer {
     this.send({ method, params });
   }
 
+  rejectPending(error) {
+    for (const waiter of this.pending.values()) waiter.reject(error);
+    this.pending.clear();
+  }
+
+  // 子进程退出或 spawn 失败：挂起的请求都 reject，免得一直等一个不会来的回应
   fail(error) {
     if (this.closed) return;
     this.closed = true;
-    for (const waiter of this.pending.values()) waiter.reject(error);
-    this.pending.clear();
+    this.rejectPending(error);
     this.onNotification({ method: "connection/closed", params: { message: error.message } });
   }
 
+  // 关闭子进程并等它真的退出：先 SIGTERM，宽限期后还在就 SIGKILL；可重复调用
   close() {
-    if (this.closed) return;
+    if (this.closePromise) return this.closePromise;
+    this.closed = true;
+    this.rejectPending(new Error("codex app-server 连接已关闭"));
+    if (!this.proc.pid || this.proc.exitCode !== null || this.proc.signalCode !== null) return (this.closePromise = Promise.resolve());
     this.proc.stdin.end();
     this.proc.kill("SIGTERM");
-    this.closed = true;
+    const killer = setTimeout(() => this.proc.kill("SIGKILL"), KILL_GRACE_MS);
+    return (this.closePromise = this.exited.then(() => clearTimeout(killer)));
   }
 }

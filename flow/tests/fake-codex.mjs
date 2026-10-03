@@ -7,9 +7,20 @@ const args = process.argv.slice(2);
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\n');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 if (args[0] === 'app-server') {
+  // 启动阶段的开关：FAKE_INIT 让 initialize 回错误（error）、不回应（silent）或直接退出（exit），FAKE_INIT_ONLY=<子串> 只对 cwd 含该子串的进程生效；
+  // error 和 silent 时进程继续活着并把 pid 写到 $CODEX_HOME/fake-app-pid；FAKE_IGNORE_EOF=1 用定时器保活、不随 stdin 结束而退出，FAKE_IGNORE_TERM=1 再忽略 SIGTERM（只有 SIGKILL 杀得掉）
+  const initMode = process.env.FAKE_INIT && process.cwd().includes(process.env.FAKE_INIT_ONLY ?? '') ? process.env.FAKE_INIT : '';
+  if (process.env.FAKE_IGNORE_EOF) setInterval(() => {}, 1000);
+  if (process.env.FAKE_IGNORE_TERM) process.on('SIGTERM', () => {});
   readline.createInterface({ input: process.stdin }).on('line', (line) => {
     const request = JSON.parse(line);
     if (request.id === undefined) return;
+    if (request.method === 'initialize' && initMode) {
+      if (initMode === 'exit') process.exit(3);
+      fs.writeFileSync(path.join(process.env.CODEX_HOME, 'fake-app-pid'), String(process.pid));
+      if (initMode === 'error') send({ id: request.id, error: { code: -32600, message: '假初始化被拒' } });
+      return;
+    }
     let result = {};
     // 插话里带 REJECT 时像 turn 已结束那样回错误
     if (request.method === 'turn/steer' && JSON.stringify(request.params).includes('REJECT')) return send({ id: request.id, error: { code: -32600, message: '假插话被拒' } });
