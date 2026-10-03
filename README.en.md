@@ -57,13 +57,14 @@ Claude Code main conversation
 ![Task list: one flow and two single agents](docs/images/panel-list.png)
 
 - **Order**: With several tasks, each gets one row; flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends.
+- **Several tasks**: When a new task starts while you are viewing another, the panel stays where it is and the top edge of the frame says "另有 N 个任务" (N other tasks); press `b` (返回列表, back to list) to return to the list and pick another.
 - **Colors**: Flows are purple and single agents blue; the frame color follows the kinds of task in the list.
 - **Running marks**: Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻; running agents carry a spinning blue dot. When several phases run at once they all pulse, and the top edge of the frame reads 「N 个阶段并行」 (N phases in parallel).
 - **Frame**: The top edge carries the name, status, total tokens and total time; the bottom edge carries the key hints and buttons, so the frame costs no extra rows. When a long draft in the prompt squeezes the panel, the frame stays and the inner two-column box goes first.
 - **Phase column**: Each row shows number, status, name, completed count and elapsed time; time and token columns reserve their maximum width so the layout does not shift as a run grows.
 - **Two-column selection**: Both columns are selectable at any time. The cursor walks the phases on the left before the agents on the right, the right column follows the phase under the cursor, and finished phases can be opened too.
 - **Long lists**: The panel shows as many rows as fit and pages through the rest with "N more" rows; it steps aside while you view a subagent's conversation.
-- **Little space**: When a prompt draft or Claude Code's task list leaves the panel a single content row, it shows a one-line summary instead: the current phase's progress, all of its agents, and their model and effort, with "+N" for agents that do not fit. Clearing the draft or hiding the task list with `ctrl+t` brings back the full panel.
+- **Little space**: When a prompt draft or Claude Code's task list leaves the panel a single content row, it shows a one-line summary instead: the current phase's progress, all of its agents, and their model and effort, with "+N" for agents that do not fit and "另有 N 个任务" (N other tasks) at the end when other tasks exist; the task list also collapses to one line that lists every task. Clearing the draft or hiding the task list with `ctrl+t` brings back the full panel.
 
 ![Agent detail: brief, progress and steer field](docs/images/panel-agent.png)
 
@@ -77,7 +78,7 @@ Claude Code main conversation
 | `↑` `↓` (`←` `→` and `Tab` do the same) | Move between items |
 | `Enter` | Open a phase or an agent's detail; on the current agent in a detail, move to the steer field |
 | `Enter` in the steer field | Send the instruction to that agent |
-| `b` | Go back one level |
+| `b` | Go back one level; in the one-line summary, go straight to the task list |
 | `x` | Stop the selected task or the whole flow |
 | `q` | Close the panel; appears once all tasks have ended |
 | `Esc` | Return to the prompt |

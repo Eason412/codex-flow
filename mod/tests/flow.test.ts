@@ -1062,6 +1062,70 @@ test('只剩一行内容时 flow 画一行摘要：当前阶段进度和全部 a
   await ui.unmount()
 })
 
+test('看一个任务时标题写「另有 N 个任务」，返回键写「返回列表」；新任务开始时不跳走', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  // 只有一个 flow：直接进阶段栏，没有别的任务，也没有返回键
+  expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /另有/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeUndefined()
+  // 又开了一个 flow：面板仍停在原来的 flow，标题提一句，返回键回列表
+  w.dirs = ['r-1', 'r-3']
+  w.files[`${ROOT}/r-3/state.json`] = JSON.stringify({ ...flowState, runId: 'r-3', name: '第二个 flow', startedAt: iso(240) })
+  await clock.advance(2_000)
+  expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /运行中 · 另有 1 个任务/ })).toBeDefined()
+  const back = await ui.find({ type: 'Button', key: 'back' })
+  expect(back?.props.label).toBe('返回列表')
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Button', key: 'r:r-1' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'r:r-3' })).toBeDefined()
+  // agent 栏里返回是回阶段栏，仍写「返回」
+  await ui.press({ key: 'r:r-1' })
+  await ui.press({ key: 'p:审查' })
+  expect((await ui.find({ type: 'Button', key: 'back' }))?.props.label).toBe('返回')
+  await ui.unmount()
+})
+
+test('只剩一行内容时列表画成一行：全部任务都在，名称可进入；flow 摘要提示另有任务，三行时返回键直接回列表', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1', 'r-3', 's-1']
+  w.files[`${ROOT}/r-3/state.json`] = JSON.stringify({ ...flowState, runId: 'r-3', name: '第二个 flow', startedAt: iso(240) })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const props = (maxRows: number) => ({ ...(PROPS as object), maxRows }) as never
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: props(1) })
+  for (const rows of [1, 2, 3]) {
+    await ui.redraw(props(rows))
+    expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(rows)
+    for (const key of ['r:r-3', 'r:r-1', 'r:s-1']) expect(await ui.find({ type: 'Button', key })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /还有/ })).toBeUndefined()
+  }
+  await ui.redraw(props(1))
+  expect(await ui.find({ type: 'Text', text: 'Codex' })).toBeDefined()
+  await ui.press({ key: 'r:r-1' })
+  expect(await ui.find({ type: 'Text', text: ' │ 另有 2 个任务' })).toBeDefined()
+  await ui.redraw(props(24))
+  await ui.press({ key: 't:r-1:性能' })
+  for (const rows of [1, 2, 3]) {
+    await ui.redraw(props(rows))
+    expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(rows)
+    expect(await ui.find({ type: 'Text', text: ' │ 另有 2 个任务' })).toBeDefined()
+  }
+  // 三行时有外框页脚：返回键从详情直接回列表，不是逐层退
+  expect((await ui.find({ type: 'Button', key: 'back' }))?.props.label).toBe('返回列表')
+  await ui.press({ key: 'back' })
+  await ui.redraw(props(24))
+  expect(await ui.find({ type: 'Button', key: 'r:r-3' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('别的会话里结束的 flow 被本会话续跑后出现在面板上；没改动的仍然跳过', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
