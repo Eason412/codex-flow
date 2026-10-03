@@ -1017,6 +1017,33 @@ test('外框的上边写标题、下边放页脚，不另占行：草稿变长�
   await ui.unmount()
 })
 
+test('只剩一行内容时 flow 画一行摘要：当前阶段进度和全部 agent，详情页不再只剩一个 agent 和插话框', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  const tasks = flowState.tasks.map(t => (t.label === '安全' ? { label: t.label, phase: t.phase, model: t.model, effort: t.effort, brief: t.brief, status: 'running', startedAt: iso(0), log: t.log, tokens: 100 } : t))
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, tasks })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const props = (maxRows: number) => ({ ...(PROPS as object), maxRows }) as never
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: props(14) })
+  await ui.press({ key: 't:r-1:性能' })
+  expect(await ui.find({ type: 'Input' })).toBeDefined()
+  for (const rows of [1, 2, 3]) {
+    await ui.redraw(props(rows))
+    expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(rows)
+    expect(await ui.find({ type: 'Text', text: ' 审查 0/2' })).toBeDefined()
+    for (const label of [' 安全', ' 性能']) expect(await ui.find({ type: 'Text', text: label })).toBeDefined()
+    expect(await ui.find({ type: 'Input' })).toBeUndefined()
+    // 详情页的停止键停的是看不见的 agent，摘要里不放
+    expect(await ui.find({ type: 'Button', key: 'stop' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'review-api' })).toBeDefined()
+  }
+  await ui.redraw(props(14))
+  expect(await ui.find({ type: 'Input' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('别的会话里结束的 flow 被本会话续跑后出现在面板上；没改动的仍然跳过', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
