@@ -329,8 +329,12 @@ export function isolationLines(task) {
   const lines = [];
   if (task.envToMain?.length) lines.push(`⚠ 环境里的本地包指向主工作区，验收可能测的不是隔离里的代码：${list(task.envToMain)}`);
   if (["pending", "running"].includes(task.status)) return lines;
-  const m = task.merge ?? {};
-  const kept = task.worktree ? `worktree 保留在 ${task.worktree.path}；` : "";
+  const m = { ...task.merge };
+  // 被整个停掉时汇总在收尾之前打印：worktree 去留按 closeWorktree 的规则推断，result 引用名由 base 推出
+  const stopping = task.status === "cancelled" && task.worktree && !m.archiveError;
+  const keep = stopping ? task.keepWorktree || m.state === "applying" : !!task.worktree;
+  const kept = keep ? `worktree 保留在 ${task.worktree.path}；` : "";
+  if (stopping && !m.result && m.base) m.result = { ref: m.base.ref.replace(/\/base$/, "/result") };
   if (m.state === "applying") lines.push(`⚠ 合回中断，主工作区可能只应用了一部分，需人工核对；${kept}${m.before && m.merged ? `查看：git -C ${m.repo} diff ${m.before.ref} ${m.merged.ref}` : ""}`);
   else if (m.state === "applied") {
     const recheck = m.rechecked ? `，已在主工作区重新验收${task.status === "failed" && task.checkFailed ? "（未通过）" : ""}` : "";

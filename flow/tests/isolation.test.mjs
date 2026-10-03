@@ -303,8 +303,11 @@ test('被停止：运行期间 worktree 锁住；停止后成果存进引用、w
   assert.match(worktrees(repo), /locked "codex-flow r-/, '运行期间锁住');
   fs.writeFileSync(path.join(wt, 'partial.md'), '做了一半\n'); // 模拟 Codex 已写的部分
   child.kill('SIGTERM');
-  assert.equal((await done).code, 143);
+  const { code, stdout } = await done;
+  assert.equal(code, 143);
   const t = readJson(statePath(dir)).tasks[0];
+  assert.ok(stdout.includes(`⚠ 成果没合回（已停止）；查看：git -C ${repo} diff ${t.merge.base.ref} ${t.merge.result.ref}`), stdout);
+  assert.ok(!stdout.includes('worktree 保留在'), '停止时打印的汇总与收尾后的去留一致');
   assert.equal(t.status, 'cancelled');
   assert.equal(t.worktree, undefined);
   assert.equal(exists(wt), false);

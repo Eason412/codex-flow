@@ -1,10 +1,13 @@
 // 隔离任务的 worktree 建立：写出快照内容、链接环境目录、复制 .worktreeinclude 列出的文件，并检测环境里的本地包是否指向主工作区。
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { git, isLink, markWorktree } from "./archive.mjs";
 import { realPath } from "./scope.mjs";
 
 const ENV_DIRS = new Set(["node_modules", ".venv", "venv"]);
+// 写时复制：macOS 用 cp -c（clonefile），Linux 用 cp --reflink=auto；Node 的 COPYFILE_FICLONE 在 macOS 上不克隆，只会退回普通复制
+const COW = process.platform === "darwin" ? ["-c"] : process.platform === "linux" ? ["--reflink=auto"] : [];
 const firstLine = (text) => String(text ?? "").trim().split("\n")[0];
 
 export function must(result, what) {
@@ -31,21 +34,28 @@ function linkEnvDirs(root, wt) {
   return links;
 }
 
-// 项目根 .worktreeinclude（.gitignore 语法，与 Claude Code 相同）列出、同时又被忽略的文件复制进 worktree，如 .env。
-// 能写时复制（APFS clonefile、Linux reflink，与 cp -c / cp --reflink=auto 相同）就用，不能就普通复制；落在环境目录链接里的不复制
+// 按目录成批写时复制；cp 失败（如文件系统不支持克隆）就逐个普通复制
+function copyInto(root, wt, rels) {
+  const byDir = new Map();
+  for (const rel of rels) byDir.set(path.dirname(rel), [...(byDir.get(path.dirname(rel)) ?? []), rel]);
+  for (const [dir, files] of byDir) {
+    fs.mkdirSync(path.join(wt, dir), { recursive: true });
+    for (let i = 0; i < files.length; i += 200) {
+      const batch = files.slice(i, i + 200);
+      const copied = spawnSync("cp", [...COW, ...batch.map((rel) => path.join(root, rel)), `${path.join(wt, dir)}/`]);
+      if (copied.status !== 0) for (const rel of batch) fs.copyFileSync(path.join(root, rel), path.join(wt, rel));
+    }
+  }
+}
+
+// 项目根 .worktreeinclude（.gitignore 语法，与 Claude Code 相同）列出、同时又被忽略的文件写时复制进 worktree，如 .env；落在环境目录链接里的不复制
 function copyIncluded(root, wt, links) {
   const include = path.join(root, ".worktreeinclude");
   if (!fs.existsSync(include)) return;
   const candidates = git(root, ["ls-files", "-z", "--others", "--ignored", `--exclude-from=${include}`]).stdout;
   if (!candidates) return;
   const ignored = git(root, ["check-ignore", "-z", "--stdin"], { input: candidates }).stdout.split("\0").filter(Boolean);
-  for (const rel of ignored) {
-    if (links.some((l) => rel === l || rel.startsWith(`${l}/`))) continue;
-    const target = path.join(wt, rel);
-    if (fs.existsSync(target)) continue;
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(path.join(root, rel), target, fs.constants.COPYFILE_FICLONE);
-  }
+  copyInto(root, wt, ignored.filter((rel) => !links.some((l) => rel === l || rel.startsWith(`${l}/`)) && !fs.existsSync(path.join(wt, rel))));
 }
 
 // 建 worktree 并写出快照内容，再把 index 重置回 HEAD（不动文件）：任务里 git status / git diff 看到的未提交改动和主工作区一致。
