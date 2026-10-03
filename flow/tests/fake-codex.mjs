@@ -31,6 +31,12 @@ if (args[0] === 'app-server') {
     if (request.method === 'turn/start') {
       // prompt 里的标记控制假结果：SLOW 慢 1.5 秒（FAKE_SLOW_MS 可改），FAIL 失败，CWD 回报工作目录，JSON 回 review 格式，CMD 先跑一条命令，CMDHANG 只发命令开始、不发结束
       const prompt = request.params?.input?.[0]?.text ?? '';
+      // STUBBORN：这个 app-server 从此不随 stdin 结束退出、不理 SIGTERM（只有 SIGKILL 杀得掉），pid 追加到 $CODEX_HOME/fake-app-pids
+      if (prompt.includes('STUBBORN')) {
+        setInterval(() => {}, 1000);
+        process.on('SIGTERM', () => {});
+        fs.appendFileSync(path.join(process.env.CODEX_HOME, 'fake-app-pids'), `${process.pid}\n`);
+      }
       let text = '假 flow 结果';
       if (prompt.includes('CWD')) text = `cwd=${process.cwd()}`;
       if (prompt.includes('JSON')) text = JSON.stringify({ verdict: 'pass_with_issues', summary: '第一行结论\n第二行结论', findings: [{ severity: 'major' }, { severity: 'minor' }, { severity: 'minor' }], open_questions: [] });

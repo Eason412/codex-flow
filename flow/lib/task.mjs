@@ -232,8 +232,9 @@ export async function runTask(dir, state, task, prompt, cwd) {
     }
     await startTurn(run);
   } catch (error) {
-    servers.delete(run.server);
+    // 关完才从登记里去掉：关闭期间收到停止信号时 onStop 还要等它（不理 SIGTERM 的要等到强制结束）
     await run.server?.close();
+    servers.delete(run.server);
     // 被整个停掉时 onStop 已记为已停止，关 app-server 引起的启动失败不覆盖它
     if (task.status !== "cancelled") {
       task.status = "failed";
@@ -251,7 +252,7 @@ export async function runTask(dir, state, task, prompt, cwd) {
   const poll = startControlPoll(run);
   const end = await run.turnDone;
   clearInterval(poll);
-  servers.delete(run.server);
   await run.server.close();
+  servers.delete(run.server);
   await finishTurn(run, end);
 }

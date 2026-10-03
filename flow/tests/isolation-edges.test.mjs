@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 const { removeWorktree } = await import('../lib/archive.mjs');
+const { settleChecks } = await import('../lib/checks.mjs');
+const { markStopping } = await import('../lib/runtime.mjs');
 
 const read = (...parts) => fs.readFileSync(path.join(...parts), 'utf8');
 const exists = (...parts) => fs.existsSync(path.join(...parts));
@@ -25,6 +27,19 @@ async function waitState(pred, tries = 150) {
   }
   throw new Error('等不到预期的运行状态');
 }
+
+// 记下 pid 的 app-server（STUBBORN）是否都已退出
+const pidsFile = () => path.join(process.env.CODEX_HOME, 'fake-app-pids');
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const stubborn = () => (fs.existsSync(pidsFile()) ? fs.readFileSync(pidsFile(), 'utf8').split('\n').filter(Boolean).map(Number) : []);
+const killAll = () => stubborn().forEach((pid) => alive(pid) && process.kill(pid, 'SIGKILL'));
 
 function start(tasks, repo, env) {
   const file = path.join(root, 'plan.json');
@@ -140,8 +155,8 @@ test('整个停止时：等合回的隔离任务不再合回，验收被杀的�
   const { done } = start([
     { label: '甲', ...sol, writes: ['a.md'], prompt: '甲', checks: ['sleep 5'] },
     iso('乙', 'PATCH:a.md', { writes: ['a.md'] }),
-    { label: '丙', ...sol, writes: [], prompt: 'SLOW' },
-  ], repo, { FAKE_IGNORE_EOF: '1', FAKE_IGNORE_TERM: '1', FAKE_SLOW_MS: '20000' });
+    { label: '丙', ...sol, writes: [], prompt: 'SLOW STUBBORN' },
+  ], repo, { FAKE_SLOW_MS: '20000' });
   const { dir, state } = await waitState((s) => taskOf(s, '乙')?.merging && taskOf(s, '甲')?.checking);
   process.kill(state.pid, 'SIGTERM');
   const { code, stdout } = await done;
@@ -150,6 +165,49 @@ test('整个停止时：等合回的隔离任务不再合回，验收被杀的�
   assert.deepEqual(after.tasks.map((t) => [t.label, t.status]), [['甲', 'cancelled'], ['乙', 'cancelled'], ['丙', 'cancelled']]);
   assert.equal(read(repo, 'a.md'), '原\n', '乙没合回');
   assert.ok(taskOf(after, '乙').merge.result);
+  assert.deepEqual(stubborn().filter(alive), [], 'app-server 都已退出');
+});
+
+test('Codex 已结束、app-server 还在关闭时整个停止：等它真正退出再以 143 结束', async () => {
+  const { repo } = gitRepo('repo', { 'a.md': '原\n' });
+  const { done } = start([iso('甲', 'PATCH:a.md STUBBORN', { writes: ['a.md'] })], repo);
+  try {
+    const { dir, state } = await waitState((s) => s.tasks[0]?.log && exists(RUNS, s.runId, s.tasks[0].log) && read(RUNS, s.runId, s.tasks[0].log).includes('"turn/completed"'), 300);
+    await sleep(100);
+    process.kill(state.pid, 'SIGTERM');
+    const { code } = await done;
+    assert.equal(code, 143);
+    assert.equal(stubborn().length, 1);
+    assert.deepEqual(stubborn().filter(alive), [], 'app-server 已退出');
+    assert.equal(readJson(statePath(dir)).tasks[0].status, 'cancelled');
+  } finally {
+    killAll();
+  }
+});
+
+test('Codex 刚结束、验收还没开始时整个停止：不再启动验收命令，任务记为已停止', async () => {
+  const { repo } = gitRepo('repo', { 'a.md': '原\n' });
+  const { done } = start([
+    { label: '甲', ...sol, writes: ['a.md'], prompt: 'PATCH:a.md', checks: ['echo ran > after-stop.txt'] },
+    { label: '丙', ...sol, writes: [], prompt: 'SLOW STUBBORN' },
+  ], repo, { FAKE_SLOW_MS: '20000' });
+  try {
+    let found;
+    for (let i = 0; i < 400 && !found; i++) {
+      await sleep(20);
+      const id = fs.readdirSync(RUNS).find((n) => n.startsWith('r-'));
+      const s = id && readJson(statePath(path.join(RUNS, id)));
+      if (s && taskOf(s, '甲')?.turnEnded) found = { dir: path.join(RUNS, id), state: s };
+    }
+    assert.ok(found, '甲的 Codex 没结束');
+    process.kill(found.state.pid, 'SIGTERM');
+    const { code } = await done;
+    assert.equal(code, 143);
+    assert.equal(exists(repo, 'after-stop.txt'), false, '停止后不再启动验收命令');
+    assert.equal(taskOf(readJson(statePath(found.dir)), '甲').status, 'cancelled');
+  } finally {
+    killAll();
+  }
 });
 
 test('合回按三方合并后实际要写的文件取租约：主工作区把文件改了名、新名字被运行中任务占着时等它结束', async () => {
@@ -181,4 +239,16 @@ test('连续续跑：写入任务复用的结果仍过期时保留提示，重�
   assert.match(second.stdout, /⚠ 复用的结果之后这些文件改过：w\.md/);
   runPlan(p, ['--resume', state.runId, '--rerun', '写']);
   assert.equal(taskOf(lastRun().state, '写').stale, undefined);
+});
+
+// 放在最后：标记停止会影响同一进程里之后的测试
+test('整个停止后结算验收：通过、失败都保留已停止，不改成完成或验收失败', () => {
+  markStopping();
+  for (const failure of [null, '验收未通过：x（exit 1）']) {
+    const task = { label: '甲', status: 'cancelled', error: '收到 SIGTERM，已停止' };
+    settleChecks(task, failure);
+    assert.equal(task.status, 'cancelled');
+    assert.equal(task.error, '收到 SIGTERM，已停止');
+    assert.equal(task.checkFailed, false);
+  }
 });

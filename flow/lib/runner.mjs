@@ -40,6 +40,8 @@ export async function onStop(signal) {
   save();
   // 等 app-server 子进程真正退出（不理会 SIGTERM 的会被强制结束），最多等 3 秒
   await Promise.race([Promise.all([...servers].map((server) => server.close())), new Promise((r) => setTimeout(r, 3000))]);
+  // 到时还没退出的直接强制结束，父进程退出后就没人再管它们了
+  for (const server of servers) server.proc?.kill("SIGKILL");
   // Codex 都停了再收尾隔离任务（存成果、删目录），汇总写的是收尾后的实际去留
   closeActive();
   const summary = renderSummary(current.dir, state);

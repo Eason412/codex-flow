@@ -78,6 +78,8 @@ async function runChecks(dir, task, cwd, stopFile) {
   checkWindows.push(window);
   try {
     for (const cmd of task.checks ?? []) {
+      // 整个 flow 已在停止：不再启动下一条命令
+      if (stopping) return "stop";
       const result = await runCheckCommand(cmd, cwd, stopFile, append);
       const { code, reason } = result;
       task.checkResults.push(result);
@@ -95,6 +97,7 @@ async function runChecks(dir, task, cwd, stopFile) {
 // 隔离任务在验收和合回期间保持运行中，用它；其余用 finishChecks
 export async function checkTask(dir, task, cwd, stopFile) {
   if (!task.checks?.length) return null;
+  if (stopping) return "stop";
   // 面板据此写「验收中」、收起插话框：Codex 已经结束，插话送不到
   task.checking = true;
   save();
@@ -107,8 +110,8 @@ export async function checkTask(dir, task, cwd, stopFile) {
 
 // 按验收结果定任务状态：验收失败保留结果，任务记为失败，续跑时只重跑验收
 export function settleChecks(task, failure) {
-  // 整个 flow 停止时验收命令被强制结束：onStop 已记为已停止，不改成验收失败
-  if (stopping && failure) {
+  // 整个 flow 已在停止：onStop 已把运行中的任务记为已停止，验收通过、失败或被强制结束都不改它
+  if (stopping) {
     task.checkFailed = false;
     task.status = "cancelled";
     return;
