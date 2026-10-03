@@ -822,9 +822,10 @@ test('汇总给出每个任务的结论：schema 结果带判断与问题数，m
 
 test('自定义临时模型配置控制 run.sh 和 flow；缺失或损坏配置时均拒绝启动', () => {
   const isolated = path.join(root, 'isolated');
-  for (const file of ['run.sh', 'flow/codex-flow.mjs', 'flow/statusline.mjs', 'flow/lib/state.mjs', 'flow/lib/appserver.mjs']) {
+  // 执行器入口依赖 flow/lib 下的全部模块，整个目录一起复制
+  for (const file of ['run.sh', 'flow/codex-flow.mjs', 'flow/statusline.mjs', 'flow/lib']) {
     fs.mkdirSync(path.dirname(path.join(isolated, file)), { recursive: true });
-    fs.copyFileSync(path.join(skill, file), path.join(isolated, file));
+    fs.cpSync(path.join(skill, file), path.join(isolated, file), { recursive: true });
   }
   const config = path.join(isolated, 'models.json');
   const env = fakePath();
@@ -1085,9 +1086,9 @@ test('全目录查找抛错也计入 10 秒限频，下一轮仍可发现近期�
 
 test('run.sh 登记失败（_check 通过后模型名单消失）时只提示，任务照常运行', () => {
   const isolated = path.join(root, 'isolated');
-  for (const file of ['run.sh', 'flow/codex-flow.mjs', 'flow/lib/state.mjs', 'flow/lib/appserver.mjs']) {
+  for (const file of ['run.sh', 'flow/codex-flow.mjs', 'flow/lib']) {
     fs.mkdirSync(path.dirname(path.join(isolated, file)), { recursive: true });
-    fs.copyFileSync(path.join(skill, file), path.join(isolated, file));
+    fs.cpSync(path.join(skill, file), path.join(isolated, file), { recursive: true });
   }
   const config = path.join(isolated, 'models.json');
   writeJson(config, { models: ['gpt-6.1-sol'], efforts: ['high'] });
