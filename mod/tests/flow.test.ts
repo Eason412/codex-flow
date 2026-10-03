@@ -190,7 +190,7 @@ test('任务开始时面板自动出现在输入框上方：flow 紫色、agent 
     // Enter 阶段进入右栏选 agent；返回回到阶段栏
     await ui.press({ key: 'p:复核' })
     expect(await ui.find({ type: 'Button', key: 't:r-1:汇总复核' })).toBeDefined()
-    expect(await ui.find({ text: '6-astra high · 等「审查」' })).toBeDefined()
+    expect(await ui.find({ text: '6-astra high · 等待' })).toBeDefined()
     await ui.press({ key: 'back' })
     expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
 
@@ -1045,6 +1045,10 @@ test('运行中的阶段和 agent 用蓝色点阵转动；选中的待开始阶�
   expect(first.length).toBe(2)
   expect(first.every(([, color]) => color === '#7AA2F7')).toBe(true)
   expect((await ui.find({ type: 'Text', text: /^2$/ }))?.props.color).toBeUndefined()
+  // 标题行只写状态、总 token、总时长；运行中的阶段在左栏写序号和耗时
+  expect(await ui.find({ type: 'Text', text: /^  运行中 · 15\.3k tok · \d+m\d{2}s$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^1$/ }))?.props.color).toBe('#7AA2F7')
+  expect((await ui.find({ type: 'Text', text: /^\d+m\d{2}s$/ }))?.props.color).toBe('#7AA2F7')
   // 点阵随时间转动
   await clock.advance(120)
   const second = await spinners()

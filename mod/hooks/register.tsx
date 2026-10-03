@@ -541,6 +541,21 @@ function runSubtext(run: FlowRun) {
   return parts.join(' · ')
 }
 
+// flow 详情的标题行：阶段进度和 agent 数已在两栏里，这里只写状态、总 token 和总时长
+function flowHeader(run: FlowRun) {
+  const parts = [WORD[run.status] ?? run.status]
+  const tokens = tokensOf(run.tasks)
+  if (tokens) parts.push(`${formatTokens(tokens)} tok`)
+  parts.push(formatDuration(run.seconds))
+  return parts.join(' · ')
+}
+
+// 阶段耗时：已开始的 agent 中最长的一个（并行 agent 按墙钟算）；没开始的阶段为空
+function phaseTime(run: FlowRun, title: string) {
+  const started = tasksOf(run, title).filter(t => !t.reused && t.status !== 'pending')
+  return started.length ? formatDuration(Math.max(...started.map(t => t.seconds))) : ''
+}
+
 // 进入一个 flow 时先选中正在跑的阶段，没有就选第一个
 const defaultPhase = (run: FlowRun) => (run.phases.find(p => p.status === 'running') ?? run.phases[0])?.title ?? null
 
@@ -998,14 +1013,17 @@ export const register: Register = on => {
     const agents = tasksOf(run, phase)
     const level = at.level
     const task = level === 'agent' ? agents.find(t => t.label === at.label) : undefined
-    const waiting = run.status === 'running' ? run.phases.find(p => p.status === 'running')?.title : undefined
-    const statsOf = (t: FlowTask) => (t.status === 'pending' && waiting && waiting !== t.phase ? `${shortModel(t.model)} ${t.effort} · 等「${waiting}」` : agentStats(t))
+    const statsOf = agentStats
     // 宽度按整个 flow 的内容算（换阶段时方框不跳），只占需要的宽度
     const countWidth = Math.max(3, ...run.phases.map(p => `${doneOf(tasksOf(run, p.title))}/${tasksOf(run, p.title).length}`.length))
+    // 阶段一行：选中标记 2 + 序号 + 空格 + 图标 + 空格 + 名称 + 进度 + 空格 + 耗时
+    const numWidth = String(run.phases.length).length
+    const timeWidth = Math.max(0, ...run.phases.map(p => phaseTime(run, p.title).length))
+    const timeCell = timeWidth ? timeWidth + 1 : 0
     const leftWidth =
       level === 'agent'
         ? Math.min(20, Math.max(16, ...agents.map(t => cells(t.label) + 4)))
-        : Math.min(22, Math.max(16, Math.max(4, ...run.phases.map(p => cells(p.title))) + 5 + countWidth))
+        : Math.min(32, Math.max(16, Math.max(4, ...run.phases.map(p => cells(p.title))) + 6 + numWidth + countWidth + timeCell))
     const available = columns - leftWidth - 7
     const labelWidth = Math.min(16, Math.max(4, ...run.tasks.map(t => cells(t.label))))
     // agent 一行：选中标记 2 + 图标 1 + 空格 1 + 名称 labelWidth+1 + 说明 + 耗时 7（含前面一格空）
@@ -1063,24 +1081,30 @@ export const register: Register = on => {
             const me = p.title === phase
             const live = p.status === 'running'
             const [g, color] = glyph(p.status)
-            const sign = live ? spinner : p.status === 'pending' ? String(leftWin.start + i + 1) : g
+            const sign = live ? spinner : g
             const count = `${doneOf(ts)}/${ts.length}`
+            const time = phaseTime(run, p.title)
+            const titleWidth = Math.max(1, leftWidth - 5 - numWidth - countWidth - timeCell)
             // 蓝色只表示运行中；选中的阶段不变暗，其余阶段暗色
             const tone = live ? BLUE : undefined
             const dim = !live && !me
             return (
               <Box>
                 <Text color={BLUE}>{level === 'phases' && hot === phaseKey(p.title) ? '❯ ' : '  '}</Text>
-                <Text color={live ? BLUE : p.status === 'pending' ? undefined : color} dimColor={!live && p.status === 'pending'}>
+                <Text color={tone} dimColor={dim}>
+                  {String(leftWin.start + i + 1).padStart(numWidth)}
+                </Text>
+                <Text> </Text>
+                <Text color={live ? BLUE : color} dimColor={!live && !color}>
                   {sign}
                 </Text>
                 <Text> </Text>
-                <Box width={Math.max(1, leftWidth - 4 - count.length)}>
+                <Box width={titleWidth}>
                   {level === 'phases' ? (
                     <Button
                       plain
                       key={phaseKey(p.title)}
-                      label={fit(p.title, leftWidth - 5 - count.length)}
+                      label={fit(p.title, titleWidth - 1)}
                       dimColor={dim ? true : undefined}
                       onPress={async () => {
                         const first = ts[0]
@@ -1090,13 +1114,22 @@ export const register: Register = on => {
                     />
                   ) : (
                     <Text color={tone} dimColor={dim}>
-                      {fit(p.title, leftWidth - 5 - count.length)}
+                      {fit(p.title, titleWidth - 1)}
                     </Text>
                   )}
                 </Box>
-                <Text color={tone} dimColor={dim}>
-                  {count}
-                </Text>
+                <Box width={countWidth} justifyContent="flex-end">
+                  <Text color={tone} dimColor={dim}>
+                    {count}
+                  </Text>
+                </Box>
+                {timeCell > 0 && (
+                  <Box width={timeCell} justifyContent="flex-end">
+                    <Text color={tone} dimColor={dim}>
+                      {time}
+                    </Text>
+                  </Box>
+                )}
               </Box>
             )
           }), leftColumn, leftWin, level !== 'agents')
@@ -1161,14 +1194,14 @@ export const register: Register = on => {
     const target = level === 'agent' ? task : agents.find(t => taskKey(run.runId, t.label) === hot)
     const stop = !running ? null : level === 'phases' ? (run.kind === 'flow' ? '停止整个 flow' : '停止') : target?.status === 'running' ? '停止' : null
     const flowHints = ['ctrl+x tab 操作', ...hints]
-    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, cells(`${run.name}  ${runSubtext(run)}`), footerCells(flowHints, stop, !outer)))
+    const flowWidth = Math.min(columns, Math.max(leftWidth + rightWidth + 7, cells(`${run.name}  ${flowHeader(run)}`), footerCells(flowHints, stop, !outer)))
     return shell(PURPLE, flowWidth, (
       <Box flexDirection="column" width={flowWidth}>
         {showTitle && <Box>
           <Text bold color={PURPLE}>
             {run.name}
           </Text>
-          <Text dimColor wrap="truncate-end">  {runSubtext(run)}</Text>
+          <Text dimColor wrap="truncate-end">  {flowHeader(run)}</Text>
         </Box>}
         <Box flexDirection="column">
           {framed && border(level === 'agent' ? `${phase ?? ''}` : '阶段', rightTitle, true)}

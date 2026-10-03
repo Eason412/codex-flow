@@ -52,7 +52,7 @@ The mod only displays and reminds; tasks keep running when it is not loaded. Run
 
 ## 🖥️ Task panel
 
-With several tasks, each gets one row: flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends. Flows are purple, single agents blue, and the frame color follows the kinds of task in the list. Running tasks, phases and agents carry a spinning blue dot indicator; pending phases show only their number.
+With several tasks, each gets one row: flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends. Flows are purple, single agents blue, and the frame color follows the kinds of task in the list. Running tasks, phases and agents carry a spinning blue dot indicator; each phase row shows its number, status, name, completed count and elapsed time, and the title line keeps only total tokens and total time.
 
 ![Task list: one flow and two single agents](docs/images/panel-list.png)
 
