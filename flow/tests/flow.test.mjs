@@ -15,7 +15,7 @@ delete process.env.CLAUDE_CODE_SESSION_ID;
 const stateLib = await import('../lib/state.mjs');
 const flow = await import('../codex-flow.mjs');
 const { RUNS, HOME, readJson, writeJson, statePath, pruneOldRuns, readModelConfig } = stateLib;
-const { indentJson, singleContext, singleWatchTick, watchSingle, findRollout, settleSingleTokens, readCompleteRecords, conclusionOf } = flow;
+const { indentJson, singleContext, singleWatchTick, watchSingle, findRollout, settleSingleTokens, readCompleteRecords, conclusionOf, inScope } = flow;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const windowStart = Date.now() - 60000;
 const start = new Date(windowStart).toISOString();
@@ -487,6 +487,170 @@ test('结论提取容错：null、非对象、未知严重级别和多行判断�
   assert.deepEqual(of({ verdict: 'pass', findings: [] }), ['pass · 无问题']);
   assert.deepEqual(of({ verdict: 'A\nB\nC\nD', summary: 'E\nF' }), ['A · B · C · D', 'E', 'F']);
   assert.deepEqual(of({ judgment: '可以', confidence: 'high' }), ['confidence high', '可以']);
+});
+
+const gitRepo = (name = 'repo') => {
+  const repo = path.join(root, name);
+  fs.mkdirSync(repo, { recursive: true });
+  assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0);
+  return repo;
+};
+
+test('写入范围：越界的改文件记录标出，同时段 shell 写入只在无人认领时标为来源未定；不影响任务状态', () => {
+  const repo = gitRepo();
+  const result = runPlan({ name: '范围', cwd: repo, phases: [{ title: '一', tasks: [
+    { label: '甲', ...sol, writes: ['a/**'], prompt: 'SLOW PATCH:a/x.md PATCH:z/out.md' },
+    { label: '乙', ...sol, writes: ['b'], prompt: 'SHELL:b/y.md' },
+    { label: '丙', ...sol, writes: ['c/**'], prompt: 'SHELL:d/z.md' },
+    { label: '丁', ...sol, writes: [], prompt: 'PATCH:e/r.md' },
+    { label: '戊', ...sol, prompt: 'PATCH:f/free.md' },
+  ] }] });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const { dir, state } = onlyRun();
+  const scope = (label) => taskOf(state, label).scope ?? null;
+  // 甲跑得最久：自己写的 z/out.md 越界；乙的 b/y.md 有乙认领，丁、戊的改动有改文件记录，都不算甲的；丙用 shell 写的 d/z.md 无人认领。
+  // 其余几个同时开始、同时结束，彼此窗口内的 shell 写入谁先谁后不确定，只断言确定的部分
+  assert.deepEqual(scope('甲'), { outside: ['z/out.md'], unclaimed: ['d/z.md'] });
+  assert.deepEqual(scope('乙')?.outside ?? [], []);
+  assert.deepEqual(scope('丙').outside, []);
+  assert.ok(scope('丙').unclaimed.includes('d/z.md'));
+  assert.deepEqual(scope('丁').outside, ['e/r.md']);
+  assert.equal(scope('戊'), null, '没写 writes 不检查');
+  assert.ok(state.tasks.every((t) => t.status === 'completed'));
+  assert.match(result.stdout, /✓ 甲 .*\n    ⚠ 越界写入：z\/out\.md\n    ⚠ 范围外变动，来源未定：d\/z\.md\n/);
+  const prompt = fs.readFileSync(path.join(dir, 'logs/丁.prompt.txt'), 'utf8');
+  assert.match(prompt, /codex-flow 约束：\n这是只读任务，不要修改任何文件。$/);
+  assert.match(fs.readFileSync(path.join(dir, 'logs/甲.prompt.txt'), 'utf8'), /只修改这些路径（相对工作目录）：a\/\*\*。/);
+});
+
+test('验收命令在任务目录运行：通过记为完成，失败或超时记为失败并保留结果，下游跳过', () => {
+  const repo = path.join(root, 'repo');
+  fs.mkdirSync(path.join(repo, 'sub'), { recursive: true });
+  const env = { ...fakePath(), CODEX_FLOW_CHECK_TIMEOUT: '1' };
+  const result = runPlan({ name: '验收', cwd: repo, phases: [
+    { title: '一', tasks: [
+      { label: '过', ...sol, cwd: 'sub', checks: ['test -f ok.txt', 'pwd -P > where.txt'], prompt: 'SHELL:ok.txt' },
+      { label: '败', ...sol, checks: ['true', 'echo 坏了 >&2; exit 3', 'touch never.txt'], prompt: '败' },
+      { label: '慢', ...sol, checks: ['sleep 5'], prompt: '慢' },
+    ] },
+    { title: '二', tasks: [{ label: '等败', ...sol, after: ['败'], prompt: '等败' }] },
+  ] }, [], env);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const { dir, state } = onlyRun();
+  assert.equal(taskOf(state, '过').status, 'completed');
+  assert.equal(fs.readFileSync(path.join(repo, 'sub', 'where.txt'), 'utf8').trim(), fs.realpathSync(path.join(repo, 'sub')));
+  assert.equal(taskOf(state, '败').status, 'failed');
+  assert.equal(taskOf(state, '败').error, '验收未通过：echo 坏了 >&2; exit 3（exit 3）');
+  assert.ok(fs.existsSync(path.join(dir, taskOf(state, '败').result)), '失败也保留结果');
+  assert.equal(fs.existsSync(path.join(repo, 'never.txt')), false, '失败后不再运行后面的验收');
+  assert.match(fs.readFileSync(path.join(dir, 'logs/败.checks.log'), 'utf8'), /\$ echo 坏了 >&2; exit 3\n坏了\n\[exit 3 · \d+s\]/);
+  assert.match(taskOf(state, '慢').error, /验收未通过：sleep 5（超时）/);
+  assert.equal(taskOf(state, '等败').status, 'skipped');
+  assert.match(result.stdout, /✓ 过 .*\n    验收 2\/2 通过\n/);
+});
+
+test('验收中停止任务会结束验收进程，任务记为已停止', { timeout: 20000 }, async (t) => {
+  const repo = path.join(root, 'repo');
+  fs.mkdirSync(repo, { recursive: true });
+  const file = path.join(root, 'plan.json');
+  writeJson(file, { name: '停验收', cwd: repo, phases: [{ title: '一', tasks: [{ label: '甲', ...sol, checks: ['sleep 2; touch late.txt'], prompt: '甲' }] }] });
+  const { child, done } = background(process.execPath, [cli, 'run', file], fakePath());
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await done; } });
+  const dir = await until(() => fs.readdirSync(RUNS).map((name) => path.join(RUNS, name)).find((d) => fs.existsSync(path.join(d, 'logs/甲.checks.log'))), '开始验收');
+  fs.writeFileSync(path.join(dir, 'control/甲.stop'), '');
+  const result = await done;
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const task = readJson(statePath(dir)).tasks[0];
+  assert.equal(task.status, 'cancelled');
+  assert.equal(task.error, '已按要求停止（验收中）');
+  await sleep(2500);
+  assert.equal(fs.existsSync(path.join(repo, 'late.txt')), false, '验收进程应已结束');
+});
+
+test('续跑只改了验收命令时复用 Codex 结果，只重跑验收；只改 writes 不重跑', () => {
+  const plan = (checks, writes) => ({ name: '改验收', cwd: root, phases: [
+    { title: '一', tasks: [{ label: '甲', ...sol, checks, writes, prompt: '甲' }] },
+    { title: '二', tasks: [{ label: '乙', ...sol, prompt: '{{task:甲}}' }] },
+  ] });
+  assert.equal(runPlan(plan(['true'])).status, 0);
+  const { dir, state } = onlyRun();
+  fs.writeFileSync(path.join(root, 'bin/codex'), '#!/bin/sh\nexit 99\n');
+  const sameWrites = runPlan(plan(['true'], ['docs']), ['--resume', state.runId]);
+  assert.equal(sameWrites.status, 0, sameWrites.stdout + sameWrites.stderr);
+  const failing = runPlan(plan(['true', 'false'], ['docs']), ['--resume', state.runId]);
+  assert.equal(failing.status, 1, failing.stdout + failing.stderr);
+  const after = readJson(statePath(dir));
+  assert.equal(taskOf(after, '甲').status, 'failed');
+  assert.equal(taskOf(after, '甲').error, '验收未通过：false（exit 1）');
+  assert.ok(taskOf(after, '甲').reused);
+  assert.equal(taskOf(after, '乙').status, 'completed', '下游沿用原结果');
+});
+
+test('范围写法：「.」、绝对路径、点开头文件、符号链接目录和目录名', () => {
+  const repo = path.join(root, 'repo');
+  fs.mkdirSync(path.join(repo, 'real', 'deep'), { recursive: true });
+  fs.symlinkSync(path.join(repo, 'real'), path.join(repo, 'link'));
+  const file = (rel) => path.join(fs.realpathSync(repo), rel);
+  assert.ok(inScope(file('any/x.md'), ['.'], repo));
+  assert.ok(inScope(file('any/x.md'), ['./'], repo));
+  assert.ok(inScope(file('abs/x.md'), [path.join(repo, 'abs')], repo));
+  assert.ok(inScope(file('src/.env'), ['src/**'], repo));
+  assert.ok(inScope(file('.github/ci.yml'), ['**/*.yml'], repo));
+  assert.ok(inScope(file('real/new.md'), ['link/**'], repo));
+  assert.ok(inScope(file('real/deep/q.md'), ['link'], repo));
+  assert.ok(!inScope(file('real/deep/q.md'), ['real/*'], repo), '单层 * 不含子目录');
+  assert.ok(!inScope(file('other/x.md'), ['src/**'], repo));
+  assert.ok(!inScope(file('x.md'), [], repo));
+});
+
+test('失败的任务也报告越界；没生效的改文件记录不算', () => {
+  const repo = gitRepo();
+  const result = runPlan({ name: '失败越界', cwd: repo, phases: [{ title: '一', tasks: [
+    { label: '败', ...sol, writes: ['a'], prompt: 'FAIL PATCH:z/out.md' },
+    { label: '拒', ...sol, writes: ['a'], prompt: 'BADPATCH:z/no.md' },
+  ] }] });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const { state } = onlyRun();
+  assert.deepEqual(taskOf(state, '败').scope.outside, ['z/out.md']);
+  assert.equal(taskOf(state, '拒').scope, null);
+  assert.match(result.stdout, /✗ 败 .*\n    ⚠ 越界写入：z\/out\.md\n/);
+});
+
+test('验收超时即失败，忽略 SIGTERM 的命令 3 秒后被强制结束；后台进程不拖住验收', { timeout: 30000 }, () => {
+  const env = { ...fakePath(), CODEX_FLOW_CHECK_TIMEOUT: '1' };
+  const t0 = Date.now();
+  const result = runPlan({ name: '强停', cwd: root, phases: [{ title: '一', tasks: [
+    { label: '顽固', ...sol, checks: ["trap '' TERM; sleep 20; exit 0"], prompt: '顽固' },
+    { label: '后台', ...sol, checks: ['(sleep 20; touch bg-late.txt) & echo started'], prompt: '后台' },
+  ] }] }, [], env);
+  assert.ok(Date.now() - t0 < 10000, `应在超时加强停之内结束，实际 ${Date.now() - t0}ms`);
+  const { state } = onlyRun();
+  assert.equal(taskOf(state, '顽固').status, 'failed');
+  assert.equal(taskOf(state, '顽固').error, "验收未通过：trap '' TERM; sleep 20; exit 0（超时）");
+  assert.equal(taskOf(state, '后台').status, 'completed', result.stdout);
+  assert.ok(taskOf(state, '后台').checkResults[0].seconds < 2);
+});
+
+test('续跑：验收失败的任务改好验收后只重跑验收；删掉 checks 直接完成；只改 writes 时按新范围重筛越界', () => {
+  const repo = gitRepo();
+  const plan = (task) => ({ name: '验收续跑', cwd: repo, phases: [{ title: '一', tasks: [{ label: '甲', ...sol, prompt: 'PATCH:z/out.md', ...task }] }] });
+  assert.equal(runPlan(plan({ writes: ['a'], checks: ['false'] })).status, 1);
+  const { dir, state } = onlyRun();
+  assert.equal(taskOf(state, '甲').checkFailed, true);
+  assert.deepEqual(taskOf(state, '甲').scope.outside, ['z/out.md']);
+  fs.writeFileSync(path.join(root, 'bin/codex'), '#!/bin/sh\nexit 99\n');
+  const read = () => taskOf(readJson(statePath(dir)), '甲');
+  // 改好验收：不调 Codex，只重跑验收
+  assert.equal(runPlan(plan({ writes: ['a'], checks: ['true'] }), ['--resume', state.runId]).status, 0);
+  assert.equal(read().status, 'completed');
+  assert.equal(read().checkFailed, false);
+  // 删掉 checks：直接完成
+  assert.equal(runPlan(plan({ writes: ['a'] }), ['--resume', state.runId]).status, 0);
+  assert.equal(read().status, 'completed');
+  // 范围放宽到 z：原来的越界记录消失
+  assert.equal(runPlan(plan({ writes: ['a', 'z'] }), ['--resume', state.runId]).status, 0);
+  assert.equal(read().scope, null);
+  assert.ok(read().reused);
 });
 
 test('promptFile 与 {{file:}} 按计划目录展开，任务 cwd 相对 plan.cwd；展开后的计划供续跑', () => {

@@ -20,7 +20,22 @@ if (args[0] === 'app-server') {
       let text = '假 flow 结果';
       if (prompt.includes('CWD')) text = `cwd=${process.cwd()}`;
       if (prompt.includes('JSON')) text = JSON.stringify({ verdict: 'pass_with_issues', summary: '第一行结论\n第二行结论', findings: [{ severity: 'major' }, { severity: 'minor' }, { severity: 'minor' }], open_questions: [] });
+      // PATCH:<路径> 像 apply_patch 一样写文件并发改文件记录，SHELL:<路径> 只写文件（像 shell 命令）
+      const write = (rel) => {
+        const file = path.resolve(process.cwd(), rel);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, `写入 ${Date.now()}\n`);
+        return file;
+      };
       setTimeout(() => {
+        for (const [, rel] of prompt.matchAll(/(?<!BAD)PATCH:(\S+)/g)) {
+          send({ method: 'item/completed', params: { item: { type: 'fileChange', id: rel, status: 'completed', changes: [{ path: write(rel), kind: { type: 'add' }, diff: '' }] } } });
+        }
+        for (const [, rel] of prompt.matchAll(/SHELL:(\S+)/g)) write(rel);
+        // BADPATCH:<路径> 发一条没生效的改文件记录，不写文件
+        for (const [, rel] of prompt.matchAll(/BADPATCH:(\S+)/g)) {
+          send({ method: 'item/completed', params: { item: { type: 'fileChange', id: rel, status: 'failed', changes: [{ path: path.resolve(process.cwd(), rel), kind: { type: 'add' }, diff: '' }] } } });
+        }
         send({ method: 'thread/tokenUsage/updated', params: { tokenUsage: { total: { totalTokens: 987 } } } });
         if (prompt.includes('FAIL')) return send({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: '假失败' } } } });
         send({ method: 'item/completed', params: { item: { type: 'agentMessage', text } } });

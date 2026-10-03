@@ -7,7 +7,8 @@
 //   codex-flow.mjs cancel <runId> [任务名]              停整个 flow 或其中一个任务
 //   codex-flow.mjs steer <runId> <任务名> "<补充指示>"   给运行中的任务插话
 //   codex-flow.mjs watch <runId> [--alert-after 秒]     有任务跑满时长或 flow 结束时打印一行并退出
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -106,6 +107,11 @@ function validatePlan(plan) {
       if (task.after !== undefined && !(Array.isArray(task.after) && task.after.every((n) => typeof n === "string" && n.trim()))) {
         die(`任务「${task.label}」的 after 要写成任务名或阶段标题的数组`);
       }
+      for (const key of ["writes", "checks"]) {
+        if (task[key] !== undefined && !(Array.isArray(task[key]) && task[key].every((n) => typeof n === "string" && n.trim()))) {
+          die(`任务「${task.label}」的 ${key} 要写成字符串数组`);
+        }
+      }
     }
   }
   return dependencies(plan);
@@ -173,8 +179,182 @@ function save() {
   if (current) writeJson(statePath(current.dir), current.state);
 }
 
+// ---------- 写入范围与验收 ----------
+
+const CHECK_TIMEOUT = (Number(process.env.CODEX_FLOW_CHECK_TIMEOUT) > 0 ? Number(process.env.CODEX_FLOW_CHECK_TIMEOUT) : 600) * 1000;
+const CHECK_LOG_LIMIT = 1 << 20; // 每条验收命令最多记 1MB 输出
+const HASH_LIMIT = 8 << 20; // 超过 8MB 的文件用大小和修改时间代替内容摘要
+const checkProcs = new Set();
+const touchedBy = new Map(); // 任务名 → Codex 改文件记录里的路径，判断范围外变动来自哪个任务
+const checkWindows = []; // 验收命令运行的时段，验收产物可能被同时段的其他任务看成范围外变动
+
+// 删除的文件没法 realpath，就解析它所在的目录；macOS 的 /var 与 /private/var、符号链接目录靠这里对齐
+function realPath(file) {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    const parent = path.dirname(file);
+    return parent === file ? path.resolve(file) : path.join(realPath(parent), path.basename(file));
+  }
+}
+
+// 写进 prompt 末尾，让 Codex 知道范围和验收命令；执行器结束后仍自己核对
+function withContract(prompt, task) {
+  const lines = [];
+  if (task.writes) {
+    lines.push(task.writes.length ? `只修改这些路径（相对工作目录）：${task.writes.join("、")}。` : "这是只读任务，不要修改任何文件。");
+  }
+  if (task.checks?.length) {
+    lines.push("你结束后执行器会在工作目录依次运行下面的验收命令，全部退出码为 0 才算完成：", ...task.checks.map((c) => `- ${c}`));
+  }
+  return lines.length ? `${prompt}\n\n---\ncodex-flow 约束：\n${lines.join("\n")}` : prompt;
+}
+
+// 工作目录所在 git 仓库里未提交文件的状态和内容摘要；不在 git 里返回 null
+function gitSnapshot(cwd) {
+  const top = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (top.status !== 0) return null;
+  const root = realPath(top.stdout.trim());
+  const status = spawnSync("git", ["-C", root, "status", "--porcelain=v1", "-z", "--untracked-files=all"], { encoding: "utf8", maxBuffer: 1 << 26 });
+  if (status.status !== 0) return null;
+  const files = new Map();
+  const parts = status.stdout.split("\0");
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (entry.length < 4) continue;
+    const file = path.join(root, entry.slice(3));
+    // 改名记录后面跟着原路径，原路径按删除记
+    if ((entry[0] === "R" || entry[0] === "C") && parts[i + 1]) files.set(path.join(root, parts[++i]), `${entry[0]}-from`);
+    let digest = "missing";
+    try {
+      const stat = fs.statSync(file);
+      digest = stat.size > HASH_LIMIT ? `${stat.size}:${stat.mtimeMs}` : crypto.createHash("sha1").update(fs.readFileSync(file)).digest("hex");
+    } catch {
+      // 删除或读不到的文件只记状态
+    }
+    files.set(file, `${entry.slice(0, 2)}:${digest}`);
+  }
+  return files;
+}
+
+function changedFiles(before, after) {
+  if (!before || !after) return [];
+  return [...new Set([...before.keys(), ...after.keys()])].filter((file) => before.get(file) !== after.get(file));
+}
+
+// 范围写法：相对任务工作目录的路径或 glob，也可以写绝对路径；写目录名包含其下所有文件，「.」表示整个工作目录，glob 也匹配点开头的文件。
+// 通配符之前的目录部分按 realpath 换算，符号链接目录与真实路径一致
+function scopePatterns(patterns, cwd) {
+  const base = realPath(cwd);
+  return patterns.map((raw) => {
+    const segments = path.resolve(cwd, raw).split(path.sep);
+    const glob = segments.findIndex((s) => /[*?[\]{}]/.test(s));
+    const literal = glob < 0 ? segments.join(path.sep) : segments.slice(0, glob).join(path.sep) || path.sep;
+    const rest = glob < 0 ? [] : segments.slice(glob);
+    return path.relative(base, path.join(realPath(literal), ...rest));
+  });
+}
+
+export function inScope(file, patterns, cwd) {
+  const rel = path.relative(realPath(cwd), file);
+  const undot = (p) => p.replace(/(^|\/)\./g, "$1\u0000");
+  return scopePatterns(patterns, cwd).some((p) =>
+    p === "" || rel === p || rel.startsWith(`${p}/`) || path.matchesGlob(undot(rel), undot(p)));
+}
+
+// 越界：Codex 自己的改文件记录里出现了范围外的路径，确定是这个任务写的。
+// 来源未定：同一时段 git 工作区里范围外的变动，没有改文件记录，也不在同时运行的其他任务的范围里（可能是 shell 命令或其他任务的验收命令写的）
+function scopeReport(state, task, cwd, touched, before, after) {
+  const show = (file) => path.relative(realPath(cwd), file) || ".";
+  const outside = [...touched].filter((file) => !inScope(file, task.writes, cwd));
+  const start = Date.parse(task.startedAt);
+  const others = state.tasks.filter((t) => t !== task && t.writes && t.startedAt && (!t.endedAt || Date.parse(t.endedAt) >= start));
+  const claimed = (file) => others.some((t) => inScope(file, t.writes, t.cwd ?? state.cwd))
+    || state.tasks.some((t) => t !== task && touchedBy.get(t.label)?.has(file));
+  const unclaimed = changedFiles(before, after).filter((file) => !touched.has(file) && !inScope(file, task.writes, cwd) && !claimed(file));
+  const duringChecks = unclaimed.length > 0 && checkWindows.some((w) => w.label !== task.label && (w.end ?? Infinity) >= start);
+  if (!outside.length && !unclaimed.length) return null;
+  return { outside: outside.map(show).sort(), unclaimed: unclaimed.map(show).sort(), ...(duringChecks ? { duringChecks } : {}) };
+}
+
+function killGroup(child, signal) {
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    // 已经退出
+  }
+}
+
+// 依次运行验收命令，输出写进 logs/<任务>.checks.log；有一条失败就停。
+// 超时或收到停止时先 SIGTERM，3 秒后 SIGKILL；命令退出后整组结束，不留后台进程。返回失败说明、"stop" 或 null（全部通过）
+async function runChecks(dir, task, cwd, stopFile) {
+  const logFile = path.join(dir, "logs", `${fileSafe(task.label)}.checks.log`);
+  const append = (text) => {
+    try {
+      fs.appendFileSync(logFile, text);
+    } catch {
+      // 日志写不进不影响验收结果
+    }
+  };
+  fs.writeFileSync(logFile, "");
+  task.checkResults = [];
+  const window = { label: task.label, start: Date.now(), end: null };
+  checkWindows.push(window);
+  try {
+    for (const cmd of task.checks ?? []) {
+      const t0 = Date.now();
+      append(`$ ${cmd}\n`);
+      const child = spawn("sh", ["-c", cmd], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      checkProcs.add(child);
+      let reason = null;
+      let logged = 0;
+      const record = (data) => {
+        if (logged < CHECK_LOG_LIMIT) append(data.subarray(0, CHECK_LOG_LIMIT - logged));
+        logged += data.length;
+      };
+      child.stdout.on("data", record);
+      child.stderr.on("data", record);
+      const stop = (why) => {
+        if (reason) return;
+        reason = why;
+        killGroup(child, "SIGTERM");
+        setTimeout(() => killGroup(child, "SIGKILL"), 3000).unref();
+      };
+      const timer = setTimeout(() => stop("超时"), CHECK_TIMEOUT);
+      const poll = setInterval(() => fs.existsSync(stopFile) && stop("stop"), 500);
+      let code;
+      try {
+        code = await new Promise((resolve) => {
+          child.on("error", () => resolve(127));
+          // 等 exit 而不是 close：命令留下的后台进程会占着输出管道
+          child.on("exit", (c, signal) => resolve(c ?? (signal ? 128 : 1)));
+        });
+        await new Promise((r) => setTimeout(r, 200)); // 让管道里剩下的输出写完
+      } finally {
+        clearTimeout(timer);
+        clearInterval(poll);
+        killGroup(child, "SIGKILL");
+        child.stdout.destroy();
+        child.stderr.destroy();
+        checkProcs.delete(child);
+      }
+      const seconds = Math.round((Date.now() - t0) / 1000);
+      if (logged > CHECK_LOG_LIMIT) append(`\n[输出共 ${logged} 字节，只记前 ${CHECK_LOG_LIMIT} 字节]\n`);
+      append(`[exit ${code}${reason ? `，${reason}` : ""} · ${seconds}s]\n\n`);
+      task.checkResults.push({ cmd, code, seconds, ...(reason ? { reason } : {}) });
+      save();
+      if (reason === "stop") return "stop";
+      if (reason || code !== 0) return `验收未通过：${cmd}（${reason ?? `exit ${code}`}）`;
+    }
+    return null;
+  } finally {
+    window.end = Date.now();
+  }
+}
+
 function onStop(signal) {
   if (!current) process.exit(143);
+  for (const child of checkProcs) killGroup(child, "SIGKILL");
   const { state } = current;
   const at = nowIso();
   for (const task of state.tasks) {
@@ -208,6 +388,10 @@ async function runTask(dir, state, task, prompt, cwd) {
   fs.writeFileSync(path.join(dir, "logs", `${fileSafe(task.label)}.prompt.txt`), prompt);
   save();
 
+  // 写入范围：开始前记下 git 工作区状态，运行中收集 Codex 的改文件记录
+  const before = task.writes ? gitSnapshot(cwd) : null;
+  const touched = new Set();
+  touchedBy.set(task.label, touched);
   let lastMessage = null;
   let resolveTurn;
   const turnDone = new Promise((r) => (resolveTurn = r));
@@ -219,6 +403,11 @@ async function runTask(dir, state, task, prompt, cwd) {
         const p = m.params ?? {};
         const item = p.item ?? {};
         if (m.method === "item/completed" && item.type === "agentMessage") lastMessage = item.text ?? lastMessage;
+        if (m.method === "item/completed" && item.type === "fileChange" && item.status === "completed") {
+          for (const change of Array.isArray(item.changes) ? item.changes : []) {
+            for (const file of [change?.path, change?.kind?.move_path]) if (typeof file === "string" && file) touched.add(realPath(path.resolve(cwd, file)));
+          }
+        }
         if (m.method === "thread/tokenUsage/updated") {
           const total = p.tokenUsage?.total?.totalTokens;
           if (typeof total === "number") task.tokens = total;
@@ -298,9 +487,7 @@ async function runTask(dir, state, task, prompt, cwd) {
   servers.delete(server);
   server.close();
 
-  task.endedAt = nowIso();
   if (end.status === "completed") {
-    task.status = "completed";
     let text = lastMessage ?? "";
     let ext = "md";
     if (task.schema) {
@@ -314,6 +501,9 @@ async function runTask(dir, state, task, prompt, cwd) {
     const resultFile = path.join(dir, "results", `${fileSafe(task.label)}.${ext}`);
     fs.writeFileSync(resultFile, `${text}\n`);
     task.result = path.relative(dir, resultFile);
+    // 写入核对在验收之前，验收命令的产物不算 Codex 写的
+    if (task.writes) task.scope = scopeReport(state, task, cwd, touched, before, before ? gitSnapshot(cwd) : null);
+    await finishChecks(dir, task, cwd, stopFile);
   } else if (end.status === "interrupted") {
     task.status = "cancelled";
     task.error = task.stopRequested ? "已按要求停止" : "被中断";
@@ -321,6 +511,38 @@ async function runTask(dir, state, task, prompt, cwd) {
     task.status = "failed";
     task.error = end.error || `turn ${end.status}`;
   }
+  // 失败或被停掉的任务也可能已经写了文件
+  if (end.status !== "completed" && task.writes) task.scope = scopeReport(state, task, cwd, touched, before, before ? gitSnapshot(cwd) : null);
+  task.endedAt = nowIso();
+  save();
+}
+
+// 验收期间任务仍算运行中。没有验收命令就直接完成；验收失败保留结果，任务记为失败，续跑时只重跑验收
+async function finishChecks(dir, task, cwd, stopFile) {
+  const failure = task.checks?.length ? await runChecks(dir, task, cwd, stopFile) : null;
+  task.checkFailed = !!failure && failure !== "stop";
+  if (failure === "stop") {
+    task.status = "cancelled";
+    task.error = "已按要求停止（验收中）";
+  } else if (failure) {
+    task.status = "failed";
+    task.error = failure;
+  } else {
+    task.status = "completed";
+    delete task.error;
+  }
+}
+
+// 续跑时只改了验收命令：复用 Codex 结果，只重跑验收
+async function recheckTask(dir, task, cwd) {
+  const stopFile = path.join(dir, "control", `${fileSafe(task.label)}.stop`);
+  task.status = "running";
+  task.startedAt = nowIso();
+  delete task.error;
+  save();
+  await finishChecks(dir, task, cwd, stopFile);
+  delete task.recheck;
+  task.endedAt = nowIso();
   save();
 }
 
@@ -376,18 +598,32 @@ async function runFlow(planFile, resumeId) {
     if (!reusable.has(label)) {
       const t = planTasks.get(label);
       const old = previous?.tasks?.find((o) => o.label === label);
-      reusable.set(label, !!(old && old.status === "completed" && old.hash === promptHash(t) && old.result && fs.existsSync(path.join(dir, old.result))
+      reusable.set(label, !!(old && (old.status === "completed" || old.checkFailed) && old.hash === promptHash(t) && old.result && fs.existsSync(path.join(dir, old.result))
         && (old.cwd ?? previous.cwd) === (t.cwd ?? cwd) && (!old.needs || sameList(old.needs, deps.get(label))))
         && deps.get(label).every(canReuse));
     }
     return reusable.get(label);
   };
+  // 验收失败或改了 checks：复用 Codex 结果、只重跑验收。只改了 writes 不重跑，按新范围重新筛一遍越界记录，来源未定的无法重算就清掉
+  const sameJson = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const rescope = (scope, t) => {
+    const taskCwd = t.cwd ?? cwd;
+    const outside = t.writes ? scope.outside.filter((f) => !inScope(realPath(path.join(taskCwd, f)), t.writes, taskCwd)) : [];
+    return outside.length ? { outside, unclaimed: [] } : null;
+  };
+  const reuse = (old, t) => {
+    const entry = { ...old, phase: t.phase, reused: true, writes: t.writes, checks: t.checks };
+    if (old.checkFailed || !sameJson(old.checks ?? [], t.checks ?? [])) Object.assign(entry, { status: "pending", recheck: true });
+    if (old.scope && !sameJson(old.writes, t.writes)) entry.scope = rescope(old.scope, t);
+    return entry;
+  };
   for (const [label, t] of planTasks) {
     const old = previous?.tasks?.find((o) => o.label === label);
+    const contract = { writes: t.writes, checks: t.checks };
     state.tasks.push(canReuse(label)
-      ? { ...old, phase: t.phase, reused: true }
+      ? reuse(old, t)
       : { label, phase: t.phase, model: t.model, effort: t.effort, brief: t.brief || briefOf(t.prompt), hash: promptHash(t), status: "pending",
-          needs: deps.get(label), ...(t.schema ? { schema: t.schema } : {}), ...(t.cwd && t.cwd !== cwd ? { cwd: t.cwd } : {}) });
+          needs: deps.get(label), ...contract, ...(t.schema ? { schema: t.schema } : {}), ...(t.cwd && t.cwd !== cwd ? { cwd: t.cwd } : {}) });
   }
   current = { dir, state };
   save();
@@ -411,7 +647,7 @@ async function runFlow(planFile, resumeId) {
             continue;
           }
           const t = planTasks.get(task.label);
-          runTask(dir, state, task, renderPrompt(t.prompt, state, dir), t.cwd ?? cwd)
+          (task.recheck ? recheckTask(dir, task, t.cwd ?? cwd) : runTask(dir, state, task, withContract(renderPrompt(t.prompt, state, dir), t), t.cwd ?? cwd))
             .catch((error) => {
               task.status = "failed";
               task.error = `执行出错：${error.message}`;
@@ -522,6 +758,10 @@ function renderSummary(dir, state) {
     if (t.reused) tail += "（复用上次结果）";
     if (t.actualModel && t.actualModel !== t.model) tail += `  ⚠ 实际模型 ${t.actualModel}`;
     lines.push(`${GLYPH[t.status] ?? "?"} ${t.label}${" ".repeat(width - cells(t.label))}  ${t.model} ${t.effort}  ${time.padStart(6)}  ${tail}`);
+    const list = (files) => (files.length > 5 ? `${files.slice(0, 5).join("、")} 等 ${files.length} 个` : files.join("、"));
+    if (t.checkResults?.length && t.status === "completed") lines.push(`    验收 ${t.checkResults.length}/${t.checks?.length ?? t.checkResults.length} 通过`);
+    if (t.scope?.outside?.length) lines.push(`    ⚠ 越界写入：${list(t.scope.outside)}`);
+    if (t.scope?.unclaimed?.length) lines.push(`    ⚠ 范围外变动，来源未定${t.scope.duringChecks ? "（期间有其他任务在跑验收）" : ""}：${list(t.scope.unclaimed)}`);
     let conclusion = [];
     try {
       conclusion = conclusionOf(dir, t);
