@@ -80,7 +80,8 @@ function loadPlan(planFile) {
         delete task.promptFile;
       }
       if (typeof task.prompt === "string") {
-        task.prompt = task.prompt.replace(/\{\{file:([^}]+)\}\}/g, (_, p) => read(p.trim(), `任务「${task.label}」引用的文件 `).trimEnd());
+        // {{file:}} 引入的是资料，其中的 {{task:}} {{phase:}} 等原样保留：先换成占位，发给 Codex 前再换回
+        task.prompt = task.prompt.replace(/\{\{file:([^}]+)\}\}/g, (_, p) => read(p.trim(), `任务「${task.label}」引用的文件 `).trimEnd().replaceAll("{{", LITERAL_BRACES));
       }
       if (task.cwd !== undefined) task.cwd = path.resolve(plan.cwd, expandHome(task.cwd));
     }
@@ -151,6 +152,10 @@ function dependencies(plan) {
   return deps;
 }
 
+// {{file:}} 引入内容里的 "{{" 在计划里存成这个占位，不参与依赖和结果替换
+const LITERAL_BRACES = "\u0001";
+const literal = (text) => text.replaceAll(LITERAL_BRACES, "{{");
+
 // {{phase:标题}} 换成该阶段所有任务的结果，{{task:任务名}} 换成单个任务的结果
 function renderPrompt(prompt, state, dir) {
   const resultOf = (task) => {
@@ -167,7 +172,8 @@ function renderPrompt(prompt, state, dir) {
     .replace(/\{\{task:([^}]+)\}\}/g, (_, label) => {
       const task = state.tasks.find((t) => t.label === label.trim());
       return task ? resultOf(task) : `（没有名为「${label}」的任务）`;
-    });
+    })
+    .replaceAll(LITERAL_BRACES, "{{");
 }
 
 // ---------- 执行 ----------
@@ -714,7 +720,7 @@ async function runFlow(planFile, resumeId) {
     const contract = { writes: t.writes, checks: t.checks };
     state.tasks.push(canReuse(label)
       ? reuse(old, t)
-      : { label, phase: t.phase, model: t.model, effort: t.effort, brief: t.brief || briefOf(t.prompt), hash: promptHash(t), status: "pending",
+      : { label, phase: t.phase, model: t.model, effort: t.effort, brief: t.brief || briefOf(literal(t.prompt)), hash: promptHash(t), status: "pending",
           needs: deps.get(label), ...contract, ...(t.schema ? { schema: t.schema } : {}), ...(t.cwd && t.cwd !== cwd ? { cwd: t.cwd } : {}) });
   }
   current = { dir, state };

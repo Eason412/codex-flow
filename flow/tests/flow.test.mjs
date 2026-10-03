@@ -752,6 +752,25 @@ test('promptFile 与 {{file:}} 按计划目录展开，任务 cwd 相对 plan.cw
   assert.ok(readJson(statePath(dir)).tasks.every((t) => t.reused));
 });
 
+test('{{file:}} 引入的资料原样发给 Codex，其中的 {{task:}} {{phase:}} 不当作引用；prompt 本身的引用照常展开', () => {
+  const planDir = path.join(root, 'literal');
+  fs.mkdirSync(planDir, { recursive: true });
+  fs.writeFileSync(path.join(planDir, 'bg.md'), '示例：{{task:名字}} 和 {{phase:标题}}\n');
+  const file = path.join(planDir, 'plan.json');
+  writeJson(file, { name: '字面', phases: [
+    { title: '一', tasks: [{ label: '甲', ...sol, prompt: '背景\n{{file:bg.md}}' }] },
+    { title: '二', tasks: [{ label: '乙', ...sol, prompt: '上一步：{{task:甲}}' }] },
+  ] });
+  const result = command(['run', file], { env: fakePath(), timeout: 10000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const { dir, state } = onlyRun();
+  const sent = (label) => fs.readFileSync(path.join(dir, 'logs', `${label}.prompt.txt`), 'utf8');
+  assert.ok(sent('甲').includes('示例：{{task:名字}} 和 {{phase:标题}}'), sent('甲'));
+  assert.ok(!sent('甲').includes('\u0001'));
+  assert.ok(!sent('乙').includes('{{task:甲}}'), sent('乙'));
+  assert.deepEqual(taskOf(state, '乙').needs, ['甲']);
+});
+
 for (const [name, tasks, pattern] of [
   ['引用不存在的任务', [{ label: 'x', prompt: '{{task:没有}}' }], /指向不存在的任务: 没有/],
   ['引用所在阶段', [{ label: 'x', prompt: '{{phase:一}}' }], /不能等待自己/],
