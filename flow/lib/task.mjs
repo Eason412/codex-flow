@@ -211,7 +211,7 @@ export async function runTask(dir, state, task, prompt, cwd) {
     await startTurn(run);
   } catch (error) {
     servers.delete(run.server);
-    run.server?.close();
+    await run.server?.close();
     task.status = "failed";
     task.error = `启动失败：${error.message}`;
     task.endedAt = nowIso();
@@ -225,6 +225,6 @@ export async function runTask(dir, state, task, prompt, cwd) {
   const end = await run.turnDone;
   clearInterval(poll);
   servers.delete(run.server);
-  run.server.close();
+  await run.server.close();
   await finishTurn(run, end);
 }
