@@ -9,22 +9,21 @@
 - **Codex CLI**: OpenAI's command-line coding agent, which runs the tasks Claude dispatches.
 - **Mod**: a Claude Code plugin made of hook functions that can draw panels and register commands. The task panel in this project is a mod.
 
-Current version: [V0.1.0](https://github.com/Eason412/codex-flow/releases/tag/V0.1.0). The app-server client follows the protocol usage of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) (Apache-2.0).
+Current version: [V0.2.0](https://github.com/Eason412/codex-flow/releases/tag/V0.2.0) ([all versions and release notes](https://github.com/Eason412/codex-flow/releases)). The app-server client follows the protocol usage of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) (Apache-2.0).
 
-> ⚠️ **Requires a signed-in Codex CLI, Node.js, and a Claude Code build with mod support.** Codex runs with full access (no sandbox, no approvals) and edits files and runs commands directly.
+> ⚠️ **Requires macOS or Linux with a signed-in Codex CLI, Node.js, and a Claude Code build with mod support.** Codex runs with full access (no sandbox, no approvals) and edits files and runs commands directly.
 
 ## ✨ Features
 
-- 🧭 **Parallel phases and pipelines**: A plan file lists only phases and tasks. Tasks within a phase run in parallel and phases run in order by default; a task with `after` starts as soon as its prerequisites finish, without waiting for slower tasks in the same phase. Results are quoted with `{{task:name}}` and `{{phase:title}}`, long prompts and shared context can live in files, and each task can run in its own directory.
-- 📺 **Live panel above the prompt**: The panel appears as soon as a task starts, laid out like Claude's Workflow detail view: phases on the left, agents on the right, each row with model, effort, tokens and elapsed time. Both columns are selectable at any time, and an agent opens to show its progress and result.
+- 🧭 **Parallel phases and pipelines**: Tasks within a phase run in parallel and phases run in order by default; a task with `after` starts as soon as its prerequisites finish, without waiting for slower tasks in the same phase.
+- 📺 **Live panel above the prompt**: The panel appears as soon as a task starts, laid out like Claude's Workflow detail view with phases on the left and agents on the right; an agent opens to show its progress and result and takes extra instructions directly.
 - 🔢 **Live token usage**: Flow tasks update after each Codex reply; single tasks are read from the Codex session log every 2 seconds. Resuming or forking an earlier conversation counts only the current run.
-- ⏹️ **Native stop and completion notices**: A flow starts from a background Bash command, so pressing x in the Background list stops it, and Claude is notified when it ends. Single tasks stop with x in the panel. A running flow task takes extra instructions from the steer field in the panel, or from Claude through the `steer` command.
-- 🛡️ **Write scope and acceptance checks**: A task can declare the paths it may change and the commands that accept its work. Afterwards the executor checks Codex's file-change records and the git worktree, flags writes outside the scope, and runs the checks in the task's directory; the task completes only if they all pass.
-- ♻️ **Resume with cached results**: With `--resume`, finished tasks whose prompts are unchanged reuse their results; only changed tasks and the tasks that depend on them run again. The final summary gives each task a conclusion of up to three lines, so the result files rarely need opening.
+- ⏹️ **Native stop and completion notices**: A flow starts from a background Bash command, so pressing x in the Background list stops it, and Claude is notified when it ends; single tasks stop with x in the panel.
+- 🛡️ **Write scope and acceptance checks**: A task can declare the paths it may change and the commands that accept its work; writes outside the scope are flagged, and the task completes only if every check passes.
+- ♻️ **Resume with cached results**: With `--resume`, only changed tasks and the tasks that depend on them run again; the final summary gives each task a conclusion of up to three lines.
 - 🔍 **Verified models**: The model and effort in each report come from Codex's own session log, with ⚠ when they differ from the request or cannot be verified.
-- ⏱️ **15-minute check-ins**: Each time a task passes another 15 minutes, the mod asks Claude in the conversation to read the log and report to the user. Tasks are never stopped automatically, and elapsed time alone never marks a task as stuck.
+- ⏱️ **15-minute check-ins**: Each time a task passes another 15 minutes, the mod asks Claude in the conversation to read the log and report. Tasks are never stopped automatically, and elapsed time alone never marks a task as stuck.
 - 🔒 **Model allowlist**: `models.json` lists the allowed models and efforts; any other request is refused before it starts.
-- 📐 **Windowed long lists**: The panel shows as many rows as fit and pages through the rest with "N more" rows. It steps aside while you view a subagent's conversation.
 
 ## ⚙️ How it works
 
@@ -43,23 +42,33 @@ Claude Code main conversation
 | Component | Role |
 | --- | --- |
 | `run.sh` | Runs one Codex task, records its state and reports the model actually used |
-| codex-flow executor | Reads the plan, runs phases, writes state, results and a summary |
-| codex-flow mod | Task panel, `/flow` command, stopping single tasks, 15-minute check-ins |
+| codex-flow executor | Reads the plan, follows dependencies, writes state, progress, results and a summary |
+| codex-flow mod | Task panel, `/flow` command, stopping and steering, 15-minute check-ins |
 | `statusline.mjs` | Called by ccstatusline; shows one progress line while the panel is hidden |
 | `SKILL.md` | Tells Claude when to delegate, which model to pick and how to investigate |
 | `models.json` | Allowed models and efforts |
 
-The mod only displays and reminds; tasks keep running when it is not loaded. Run records are kept for 7 days.
+- **Display apart from execution**: The mod only displays and reminds; tasks keep running when it is not loaded.
+- **Run records**: Stored in `$HOME/.claude/codex-flow` by default (override with `CODEX_FLOW_HOME`) and kept for 7 days.
+- **Paths**: The code hardcodes no paths. The repository can live in any directory, scripts find their files relative to their own location, and relative paths in a plan resolve against the plan file and its `cwd`.
 
 ## 🖥️ Task panel
 
-With several tasks, each gets one row: flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends. Flows are purple, single agents blue, and the frame color follows the kinds of task in the list. Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻ indicator; when dependencies let phases start early, several pulse at once and the top edge of the frame reads 「N 个阶段并行」 (N phases in parallel). Running agents carry a spinning blue dot; each phase row shows its number, status, name, completed count and elapsed time; the top edge of the frame carries the name, status, total tokens and total time, and the bottom edge carries the key hints and buttons, so the frame costs no extra rows: when a long draft in the prompt squeezes the panel, the frame stays and the inner two-column box goes first. Time and token columns reserve their maximum width so the layout does not shift as a run grows. Both columns are selectable at any time: the cursor walks the phases on the left before the agents on the right, the right column follows the phase under the cursor, and finished phases can be opened too; `↑` on the first agent returns to the current phase.
-
 ![Task list: one flow and two single agents](docs/images/panel-list.png)
 
-Inside an agent, the right column shows its brief, its progress (counts of commands, file edits and messages, plus the latest steps) and its result, and the left column switches to other agents in the same phase. A running flow task has a steer field below: press `Enter` on the current agent to reach it, type an instruction and press `Enter`; the executor sends it to that task with Codex's turn/steer within a couple of seconds, and progress shows whether it was delivered or rejected. Letters typed in the field never trigger `x`, `b` or `q`. Tasks in acceptance checks, finished tasks and single agents have no steer field: during checks Codex has already finished, and single agents run under `run.sh`, which cannot take steering.
+- **Order**: With several tasks, each gets one row; flows stay above single agents, newer tasks come first within each group, and rows keep their place when a task ends.
+- **Colors**: Flows are purple and single agents blue; the frame color follows the kinds of task in the list.
+- **Running marks**: Running flows and phases carry a pulsing blue star, matching Claude Code's own ✻; running agents carry a spinning blue dot. When several phases run at once they all pulse, and the top edge of the frame reads 「N 个阶段并行」 (N phases in parallel).
+- **Frame**: The top edge carries the name, status, total tokens and total time; the bottom edge carries the key hints and buttons, so the frame costs no extra rows. When a long draft in the prompt squeezes the panel, the frame stays and the inner two-column box goes first.
+- **Phase column**: Each row shows number, status, name, completed count and elapsed time; time and token columns reserve their maximum width so the layout does not shift as a run grows.
+- **Two-column selection**: Both columns are selectable at any time. The cursor walks the phases on the left before the agents on the right, the right column follows the phase under the cursor, and finished phases can be opened too.
+- **Long lists**: The panel shows as many rows as fit and pages through the rest with "N more" rows; it steps aside while you view a subagent's conversation.
 
 ![Agent detail: brief, progress and steer field](docs/images/panel-agent.png)
+
+- **Agent detail**: The right column shows the brief, the progress (counts of commands, file edits and messages, plus the latest steps) and the result; the left column switches to other agents in the same phase.
+- **Steering**: A running flow task has a steer field below. Press `Enter` on the current agent to reach it, type an instruction and press `Enter` again; the executor sends it to that task with Codex's turn/steer within a couple of seconds, and progress shows whether it was delivered or rejected.
+- **Steering limits**: Letters typed in the field never trigger `x`, `b` or `q`. Tasks in acceptance checks, finished tasks and single agents have no steer field, because Codex has already finished during checks and single agents run under `run.sh`.
 
 | Key | Action |
 | --- | --- |
@@ -73,13 +82,15 @@ Inside an agent, the right column shows its brief, its progress (counts of comma
 | `Esc` | Return to the prompt |
 | `ctrl+x ctrl+a` | Expand the panel after Claude Code folds it |
 
-While tasks run, the panel can be folded but not closed; `/flow` opens it at any time. A panel that opened automatically hides itself 30 seconds after all tasks end.
+- **Opening and closing**: `/flow` opens the panel at any time; while tasks run, it can be folded but not closed.
+- **Auto-hide**: A panel that opened automatically hides itself 30 seconds after all tasks end.
 
 ## 🚀 Setup
 
-Have an agent read [SETUP.md](SETUP.md) and follow its steps for installation, configuration and verification. Afterwards, start a new Claude Code session; the mod loads when a session starts. macOS and Linux are supported: the executor and the panel rely on POSIX process groups and `ps`, `kill` and `pkill`, so native Windows is not. The repository can live in any directory and the code hardcodes no paths: run records default to `$HOME/.claude/codex-flow` (override with `CODEX_FLOW_HOME`), scripts find their files relative to their own location, and relative paths in a plan resolve against the plan file and its `cwd`.
+Have an agent read [SETUP.md](SETUP.md) and follow its steps for installation, configuration and verification.
 
-The user must do one thing in person: sign in to the Codex CLI (`codex login`).
+- **Afterwards**: Start a new Claude Code session; the mod loads when a session starts.
+- **In person**: The user signs in to the Codex CLI (`codex login`).
 
 ### Personal settings
 
@@ -92,7 +103,8 @@ The user must do one thing in person: sign in to the Codex CLI (`codex login`).
 
 ## 📖 Usage
 
-Day to day, ask Claude to "hand it to Codex", or describe several tasks that can run in parallel or in phases; Claude follows [SKILL.md](SKILL.md) (Chinese) to choose models, write a plan and start it in the background. The commands also work when run directly inside a Claude Code session; the panel shows only the tasks dispatched from that session.
+- **Day to day**: Ask Claude to "hand it to Codex", or describe several tasks that can run in parallel or in phases; Claude follows [SKILL.md](SKILL.md) (Chinese) to choose models, write a plan and start it in the background.
+- **Direct use**: The commands also work when run directly inside a Claude Code session; the panel shows only the tasks dispatched from that session.
 
 ```json
 {"name": "docs", "cwd": "/path/to/repos",
@@ -105,7 +117,10 @@ Day to day, ask Claude to "hand it to Codex", or describe several tasks that can
      {"label": "summary", "model": "gpt-6-astra", "effort": "high", "prompt": "Recheck:\n{{phase:write}}"}]}]}
 ```
 
-`review-a` has `after`, so it starts as soon as `doc-a` finishes; `summary` has none and waits for the whole write phase. `promptFile` and `{{file:}}` are relative to the plan file's directory, and a task's `cwd` is relative to the plan's `cwd`. A task can also limit what it changes with `"writes": ["README.md"]` and name acceptance commands with `"checks": ["<command>"]`.
+- **Scheduling**: `review-a` has `after`, so it starts as soon as `doc-a` finishes; `summary` has none and waits for the whole write phase.
+- **Quoting results**: `{{task:name}}` becomes one task's result and `{{phase:title}}` the results of a whole phase.
+- **Paths**: `promptFile` and `{{file:}}` are relative to the plan file's directory, and a task's `cwd` is relative to the plan's `cwd`.
+- **Optional fields**: `"writes": ["README.md"]` limits what a task changes, and `"checks": ["<command>"]` names its acceptance commands.
 
 | Command | Action |
 | --- | --- |
