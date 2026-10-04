@@ -2,54 +2,24 @@
 
 中文 | [English](README.en.md)
 
-**在 Claude Code 里像 Workflow 一样派发、查看和停止 Codex 任务。** Claude 把边界清楚的子任务交给 Codex CLI 执行：单个任务用 `run.sh`，多个任务用 `codex-flow` 按阶段并行。进度显示在输入框上方的任务面板里，停止、完成通知和续跑沿用 Claude Code 原生的后台任务。
+**在 Claude Code 中以 Workflow 的方式编排 Codex 任务。** Claude 负责拆分与验收，Codex CLI 负责执行：单个任务由 `run.sh` 运行，多个任务由 `codex-flow` 按阶段并行。任务进度显示在输入框上方的面板中，停止、完成通知与续跑沿用 Claude Code 的后台任务机制。
 
 ![输入框上方的 flow 面板：左栏阶段，右栏 agent](docs/images/panel-flow.png)
 
-- **Codex CLI**：OpenAI 的命令行编程智能体，本项目用它执行 Claude 派出的任务。
-- **mod**：Claude Code 的插件钩子模块，可以在界面上绘制面板、注册命令。本项目的任务面板是一个 mod。
+- **Codex CLI**：OpenAI 的命令行编程智能体，在本项目中执行 Claude 派发的任务。
+- **mod**：Claude Code 的插件钩子模块，可在界面上绘制面板、注册命令；本项目的任务面板即一个 mod。
 
 当前版本：[V0.4.0](https://github.com/Eason412/codex-flow/releases/tag/V0.4.0)（[全部版本与更新说明](https://github.com/Eason412/codex-flow/releases)）。app-server 客户端的协议用法参照 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)（Apache-2.0）。
 
-> ⚠️ **前提：macOS 或 Linux，本机需有已登录的 Codex CLI、Node.js 和支持 mod 的 Claude Code。** Codex 以完全权限运行（无沙箱、不审批），会直接修改文件和执行命令。
+> ⚠️ **运行前提：macOS 或 Linux，已登录的 Codex CLI、Node.js，以及支持 mod 的 Claude Code。** Codex 以完全权限运行，无沙箱、无审批，直接修改文件并执行命令。
 
 ## ✨ 特点
 
-- 🧭 **分阶段并行与流水线**：同一阶段的任务并行，阶段之间默认按顺序；写上 `after` 的任务在前置完成后立即开跑，不等同阶段的慢任务。
-- 📺 **输入框上方的实时面板**：任务开始时自动出现，布局参照 Claude Workflow 的详情面板，左栏阶段、右栏 agent；进入 agent 可看过程和结果，还能直接插话。
-- 🔢 **实时 token 用量**：口径与 Claude Code 的「↓ N tokens」相同，是当前上下文加本次运行的输出，不把每次调用的输入累加；flow 任务在 Codex 每次回复后更新，单个任务每 2 秒从 Codex 会话记录读取。
-- ⏹️ **原生停止与完成通知**：flow 由后台 Bash 启动，在 Background 列表按 x 即可停止，结束时自动通知 Claude；单个任务在面板中按 x 停止。
-- 🛡️ **写入范围与验收**：任务可声明允许修改的路径和验收命令；范围重叠的任务自动排队，实际改了同一文件的两边都标出，验收命令全部通过才算完成。
-- ♻️ **续跑复用结果**：`--resume` 时只重跑改动的任务和依赖它的任务；运行结束时记下工作区内容快照，续跑时之后改过的文件会让只读任务重跑、让写入任务的复用结果标出「已过期」。
-- 📏 **任务说明可计量、回报不占上下文**：发给 Codex 的说明按五部分计字数，`stats` 一条命令看开销；完整回复留在文件里，Claude 只读每个任务三行以内的结论。
-- 🔍 **实际模型核实**：报告中的模型和 effort 取自 Codex 自己的会话记录，与请求不一致或无法核实时标出 ⚠。
-- ⏱️ **15 分钟排查提醒**：任务每运行满 15 分钟，mod 在对话中提醒 Claude 读日志并汇报；任务不会被自动停止，也不会只凭时长被判定为卡住。
-- 🔒 **模型白名单**：`models.json` 列出允许的模型和 effort，名单外的请求在启动前即被拒绝。
-- ⚡ **按模型默认 Fast**：`models.json` 的 `fast` 列出默认用 Fast 的模型（现在只有 `gpt-6.1-sol`），开跑时请求 `service_tier=priority`，其他模型不请求；面板和状态行在这些模型前标黄色 ⚡。
-
-## 🧱 三处设计：送出、收回、并行写
-
-codex-flow 仿照 Claude Code 的 Workflow：Claude 是编排者，看过具体工作后定下子任务，Codex 是执行者。下面三处决定了派出去的说明是否清楚、收回来的结果会不会挤占 Claude 的上下文，以及并行写文件时会不会互相覆盖。
-
-### 送出：任务说明分五部分，可以计量
-
-- **组成**：发给 Codex 的任务说明由五部分拼成：指令（计划里写的 prompt）、资料（`{{file:}}` 引入的文件）、上游结果（`{{task:}}`、`{{phase:}}` 注入的结果）、约束（执行器追加的写入范围、验收命令）和 schema（要求的返回格式）。
-- **计量**：每部分的字数和估算 token 记进运行状态，回报的字数也记下；`codex-flow.mjs stats <runId>` 每个任务一行列出说明的组成、Codex 实际 token 用量、回报大小和验收，末尾合计，用来比较不同拆法和写法的开销。
-- **资料的版本**：资料在启动时读进计划并记下摘要，运行中不会读到别的任务写出的内容；只写 runId 续跑而资料文件之后改过时，会提示这次仍用旧内容。
-
-### 收回：只把结论交给 Claude，全文留在文件
-
-- **汇总**：每个任务的完整回复写进运行目录的结果文件；汇总只给每个任务一行状态、三行以内的结论和文件路径，Claude 需要细看时再读。
-- **引用代替内容**：下游要用上游结果时，`{{path:任务名}}` 只给结果文件路径，由 Codex 自己读，不把全文塞进任务说明；注入的上游结果超过 8000 字时，汇总会提示改用它。
-- **提醒各占一行**：失败原因、越界写入、和别的任务同时改了同一文件、复用的结果已过期、隔离任务的成果分支，有才写，没有就不出现。
-
-### 并行写：和 Claude Workflow 一样，先按文件分开，确有必要才隔离
-
-- **依据**：Claude Code 的 agent teams 文档要求并行的 agent 各管不同的文件，并指出同一文件的修改不适合并行；对 33,596 个 agent PR 的研究发现 worktree 只把冲突推迟到合并时，按文件划分、逐个合并、尽早发现才能减少冲突。Claude Workflow 也是这个做法：编排者按文件拆分，要接力的任务按顺序跑，确实要同时改同一批文件才用 worktree。
-- **排队**：写了 `writes` 的任务，范围和正在运行的任务重叠时，后开始的等前一个结束再跑，效果等于给它们加了 `after`，不改动任何结果。没写 `writes` 的任务不知道会写哪里，照常并行，开始时提示补上范围。
-- **碰撞提示**：`writes` 没写或写错时，两个同时运行的任务可能改到同一个文件。按 Codex 自己的改文件记录发现后，汇总里两边各写一行，由 Claude 决定要不要重跑哪一个（先结束的那个验收时还没看到对方的改动）。它不阻止覆盖；shell 命令写的文件没有记录，查不到。
-- **可选：`isolation: "worktree"`**，做法同 Claude Workflow 的 `isolation: 'worktree'`：任务在独立 worktree 里运行和验收，有改动就把成果存成分支 `codex-flow/<runId>/<任务名>`，不合回主工作区，汇总给出查看和合进主工作区的命令，由 Claude 看过后自己合；没有改动就什么都不留。少用：每个隔离任务多占一份检出的磁盘，随仓库大小变（8.5k 文件的仓库约 1 秒、240MB），同时最多 4 个（`CODEX_FLOW_MAX_WORKTREES`）；写在计划顶层时作为默认，单个任务写 `false` 不隔离。
-- **隔离的边界**：隔离任务的改动不在主工作区，排在它后面的任务看不到，开始时会提示；要接力就别隔离，或分两次运行、中间先合并。被忽略的文件不进成果，写进 `build/` 这类被忽略目录的产物不在分支上。和 Claude 的一处不同：worktree 目录在存成分支后删掉，省磁盘；写 `keepWorktree: true` 保留。
+- 🧭 **阶段编排与并行执行**：同一阶段的任务并行运行，阶段之间依次推进；声明了 `after` 的任务在前置任务完成后立即启动，形成流水线。写入范围重叠的任务自动排队，确需同时修改同一批文件时可启用 worktree 隔离。
+- 📺 **原生界面集成**：任务启动时，输入框上方自动出现任务面板，布局参照 Claude Workflow 的详情面板，可查看过程与结果，并向运行中的任务追加指示。停止、完成通知与 Claude Code 的后台任务一致；任务每运行 15 分钟，Claude 收到一次排查提醒。
+- 📏 **上下文与用量控制**：任务的完整回复保存在结果文件中，Claude 只读取每个任务三行以内的结论。任务说明按组成部分计量，`stats` 命令列出各任务的说明构成、token 用量与回报大小，用于比较不同拆分方式的开销。
+- ♻️ **验收与结果复用**：任务可声明验收命令，全部通过才记为完成。续跑时只重新执行修改过的任务及其下游；依据工作区内容快照，只读任务在相关文件变化后自动重跑，写入任务的复用结果标注为过期。
+- 🔍 **模型管控与核实**：`models.json` 规定允许的模型与 effort，名单外的请求在启动前被拒绝，并可指定默认使用 Fast 的模型。报告中的模型与 effort 取自 Codex 自身的会话记录，与请求不符或无法核实时标注 ⚠。
 
 ## ⚙️ 工作原理
 
@@ -67,53 +37,55 @@ Claude Code 主对话
 
 | 组成 | 作用 |
 | --- | --- |
-| `run.sh` | 运行单个 Codex 任务，登记状态并报告实际使用的模型 |
-| codex-flow 执行器 | 读取计划、按依赖推进，写入状态、过程、结果和汇总 |
-| codex-flow mod | 任务面板、`/flow` 命令、停止与插话、15 分钟提醒 |
+| `run.sh` | 运行单个 Codex 任务，登记状态并报告实际模型 |
+| codex-flow 执行器 | 读取计划、按依赖调度，写入状态、过程、结果与汇总 |
+| codex-flow mod | 任务面板、`/flow` 命令、停止与追加指示、15 分钟提醒 |
 | `statusline.mjs` | 供 ccstatusline 调用，面板收起时显示一行进度 |
-| `SKILL.md` | 告诉 Claude 何时委派、选用哪个模型、如何排查 |
-| `models.json` | 允许的模型和 effort，默认用 Fast 的模型 |
+| `SKILL.md` | Claude 的委派规则：何时派发、如何拆分、选用哪个模型 |
+| `models.json` | 允许的模型与 effort、默认使用 Fast 的模型 |
 
-- **显示与运行分开**：mod 只负责显示和提醒；mod 未加载时，任务照常运行。
-- **运行记录**：每次运行在 `$HOME/.claude/codex-flow/runs/<runId>/`（可用 `CODEX_FLOW_HOME` 改）留下计划、状态、每个任务的完整回复、日志和汇总，面板、`status`、续跑和 `stats` 都读它。保留 7 天，含隔离成果分支的保留 30 天。没有定时任务：过了保留期后，下一次 codex-flow 跑完一个 flow 或单个任务时删除，含成果分支的先删仍停在成果上的分支和残留 worktree；之后不再运行就一直留着。每次汇总的「运行目录」后面写明保留到哪天，`clean <runId>` 可以立即清掉成果分支和 worktree。
-- **Codex 对话**：每个任务的 Codex 对话在任务结束时归档，全文在 `~/.codex/archived_sessions`，不出现在 Codex 桌面端的「最近」和「项目」里，做法同 Claude Workflow 的子代理记录不进 `/resume`。codex-flow 不删除 Codex 自己的会话文件。
-- **路径**：代码不写死路径。仓库可放在任意目录，脚本按自身位置找文件，计划里的相对路径按计划文件和 `cwd` 解析。
+- **显示与执行分离**：mod 只负责显示与提醒，未加载时任务照常运行。
+- **任务说明构成**：发给 Codex 的说明由五部分组成，即指令（计划中的 prompt）、资料（`{{file:}}` 引入的文件）、上游结果（`{{task:}}`、`{{phase:}}` 注入的内容）、约束（执行器追加的写入范围与验收命令）和 schema（返回格式）。资料在启动时读入计划，运行期间保持不变。
+- **结果回收**：汇总为每个任务给出一行状态、三行以内的结论与结果文件路径；失败原因、越界写入、同文件修改、结果过期与成果分支等提示仅在出现时列出。下游只需查阅上游结果的一部分时，`{{path:任务名}}` 只传递结果文件路径，由 Codex 自行读取；注入内容超过 8000 字时，汇总提示改用此方式。
+- **运行记录**：每次运行在 `~/.claude/codex-flow/runs/<runId>/`（由 `CODEX_FLOW_HOME` 调整）保存计划、状态、完整回复、日志与汇总，供面板、`status`、续跑与 `stats` 读取。记录保留 7 天，含隔离成果分支的保留 30 天；清理不依赖定时任务，在保留期过后的下一次运行结束时执行。汇总中的运行目录一行注明删除日期，`clean <runId>` 可立即清理成果分支与 worktree。
+- **Codex 会话归档**：每个任务的 Codex 会话在任务结束时归档至 `~/.codex/archived_sessions`，不出现在 Codex 桌面端的「最近」与「项目」列表中，与 Claude Workflow 子代理记录不进入 `/resume` 的做法一致。
+- **路径解析**：代码中没有固定路径，仓库可放在任意目录；计划中的相对路径按计划文件与 `cwd` 解析。
+
+## 🧱 并行写入策略
+
+并行写入的处理方式与 Claude Workflow 一致：编排者按文件划分任务，需要接力的任务依次运行，只有确需同时修改同一批文件时才使用 worktree。依据是 Claude Code agent teams 文档对文件归属的要求，以及一项针对 33,596 个 agent PR 的冲突研究：worktree 只把冲突推迟到合并阶段，按文件划分、逐个合并、尽早发现才能减少冲突。
+
+- **写入范围排队**：声明了 `writes` 的任务，若范围与正在运行的任务重叠，则等待前者结束后启动，效果等同于添加 `after`。未声明 `writes` 的任务照常并行，启动时提示补充范围。
+- **同文件修改提示**：两个同时运行的任务修改了同一文件时，汇总中双方各有一行提示，由 Claude 判断是否重跑先结束的一方。检测依据是 Codex 的文件修改记录，shell 命令写入的文件不在其中。
+- **worktree 隔离（可选）**：设置 `isolation: "worktree"` 的任务在独立 worktree 中运行与验收，与 Claude Workflow 的 `isolation: 'worktree'` 对应。产生改动时，成果保存为分支 `codex-flow/<runId>/<任务名>`，汇总给出查看与合并命令，由 Claude 审阅后合并；未产生改动时不保留任何内容。可写在计划顶层作为默认值，单个任务以 `false` 退出。
+- **隔离的代价与限制**：每个隔离任务占用一份完整检出（8.5k 文件的仓库约 1 秒、240MB），同时最多 4 个（`CODEX_FLOW_MAX_WORKTREES`）。排在隔离任务之后的任务看不到其改动，需要接力时应改为依次运行，或分两次运行并在中间合并。被忽略的文件不进入成果分支；worktree 目录在保存分支后删除，`keepWorktree: true` 可保留。
 
 ## 🖥️ 任务面板
 
 ![任务列表：一个 flow 和两个单个 agent](docs/images/panel-list.png)
 
-- **排列**：多个任务时一行一个，flow 排在单个 agent 上面，同类中新开始的在上；任务结束后位置不变。
-- **多个任务**：正在看某个任务时又有新任务开始，面板不跳走，外框上边写「另有 N 个任务」；按 `b`「返回列表」回到列表，再选另一个。别的任务结束后提示改成「已结束」，它仍留在列表下方（画暗，最多 5 个），返回键也还在，直到面板关掉。
-- **颜色**：flow 紫色，单个 agent 蓝色，外框颜色随列表中的任务类型变化；列表标题里的「N 个 flow」「N 个 agent」同样上色，右上角是全部任务的 token 合计；用 Fast 的模型前面是黄色 ⚡。
-- **运行标记**：运行中的 flow 和阶段是闪烁的蓝色星形（与 Claude Code 的 ✻ 一致），agent 是转圈的蓝色细点阵；几个阶段同时运行时都会闪烁，外框上边写「N 个阶段并行」。
-- **外框**：上边写名称、状态、总 token 和总时长，下边放操作提示和按钮，不另占行；输入框草稿变长、面板变矮时外框仍在，先省去两栏的内框。
-- **固定大小**：任务列表、flow 两栏和 agent 详情占同样的 16 行和整块宽度，进出各层时只换布局、不跳，和 Claude Code 的 Workflow 面板一样；输入框上方放不下 16 行时按可用行数画。
-- **阶段栏**：依次显示序号、状态、名称、完成数和耗时；时长和 token 栏按上限预留宽度，运行变长时版面不跳。
-- **两栏选择**：左右两栏随时可选。光标先走完左栏的阶段再进右栏的 agent，停在哪个阶段，右栏就换成它的 agent；已完成的阶段也能进去看。
-- **长列表**：按可用行数分段显示，用「还有 N 个」翻动；查看子代理的对话时，面板让出位置。
-- **空间不够时**：输入框草稿或 Claude Code 的任务清单占了位置、面板只剩一行内容时，改为一行摘要：当前阶段的进度、它的全部 agent、模型和 effort，放不下的写「+N」，有别的任务时行尾写「另有 N 个任务」；任务列表也改成一行，列出全部任务。清空草稿或按 `ctrl+t` 收起任务清单后恢复完整面板。
+- **层级**：面板分为任务列表、flow 详情与 agent 详情三层。flow 详情左栏为阶段、右栏为该阶段的 agent，已完成的阶段同样可查看；agent 详情显示任务说明、过程与结果。
+- **颜色与标记**：flow 为紫色，单个 agent 为蓝色，运行中的项目带动态标记；默认使用 Fast 的模型前标黄色 ⚡。外框上边显示名称、状态、token 合计与总时长，token 口径与 Claude Code 的「↓ N tokens」一致。
+- **多任务**：查看某个任务时有新任务启动，面板保持当前视图，外框上边注明「另有 N 个任务」，按 `b` 返回列表切换。
+- **空间不足时的摘要**：输入框草稿或 Claude Code 任务清单占用空间、面板只余一行时，改为一行摘要，显示当前阶段进度与其中的 agent；清空草稿或按 `ctrl+t` 收起任务清单后恢复。
+- **打开与关闭**：任务启动时面板自动打开，`/flow` 可随时打开。有任务运行时面板只能折叠，全部结束后可关闭；自动打开的面板在全部结束 30 秒后收起。
 
-![agent 详情：任务说明、过程与插话框](docs/images/panel-agent.png)
+![agent 详情：任务说明、过程与追加指示输入框](docs/images/panel-agent.png)
 
-- **agent 详情**：右栏显示任务说明、过程（命令、改文件和消息的次数，以及最近几步）和结果，左栏切换同阶段的其他 agent。
-- **插话**：运行中的 flow 任务下面有插话框。在当前 agent 上按 `Enter` 进入，输入补充指示后再按 `Enter`，执行器在 1–2 秒内用 Codex 的 turn/steer 发给这个任务，送达或被拒都写进过程。
-- **插话的范围**：框里输入的字母不会触发 `x`、`b`、`q`；验收中、已结束的任务和单个 agent 没有插话框，因为验收时 Codex 已经结束，单个 agent 由 `run.sh` 运行。
+- **追加指示**：运行中的 flow 任务下方有输入框，在当前 agent 上按 `Enter` 进入，输入后再按 `Enter` 发送；执行器在 1–2 秒内通过 Codex 的 turn/steer 送达，送达与否记录在过程中。
+- **适用范围**：验收中与已结束的任务、由 `run.sh` 运行的单个 agent 不提供输入框，因为此时已无可接收指示的 Codex 会话。
 
 | 按键 | 作用 |
 | --- | --- |
-| `ctrl+x tab` 或点击面板 | 把键盘切换到面板 |
+| `ctrl+x tab` 或点击面板 | 将键盘焦点切换到面板 |
 | `↑` `↓`（`←` `→`、`Tab` 相同） | 在可选项之间移动 |
-| `Enter` | 进入阶段、查看 agent 详情；在详情里的当前 agent 上进入插话框 |
-| 插话框里的 `Enter` | 把补充指示发给这个 agent |
-| `b` | 返回上一层；一行摘要里直接回任务列表 |
+| `Enter` | 进入阶段或 agent 详情；在当前 agent 上进入输入框 |
+| 输入框中的 `Enter` | 将追加指示发送给该 agent |
+| `b` | 返回上一层；一行摘要中直接返回任务列表 |
 | `x` | 停止选中的任务或整个 flow |
-| `q` | 关闭面板，任务全部结束后出现 |
-| `Esc` | 回到输入框 |
+| `q` | 关闭面板，全部任务结束后可用 |
+| `Esc` | 返回输入框 |
 | `ctrl+x ctrl+a` | 展开被 Claude Code 折叠的面板 |
-
-- **打开与关闭**：输入 `/flow` 可随时打开面板；有任务在跑时只能折叠、不能关闭。
-- **自动收起**：全部结束 30 秒后，自动打开的面板自动收起。
 
 ## 🚀 设置方法
 
@@ -127,17 +99,17 @@ Claude Code 主对话
 | 设置项 | 位置 | 说明 |
 | --- | --- | --- |
 | 允许的模型和 effort | `models.json` | 名单外的模型和 effort 直接拒绝 |
-| 默认用 Fast 的模型 | `models.json` 的 `fast` | 只能写 `models` 里有的；省略或留空时都不用 Fast |
+| 默认使用 Fast 的模型 | `models.json` 的 `fast` | 限于 `models` 中已列出的模型；省略或留空时均不使用 |
 | 提醒间隔 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ALERT_AFTER` | 单位为秒，默认 900 |
 | 运行记录位置 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_HOME` | 默认 `~/.claude/codex-flow` |
-| 归档 Codex 对话 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ARCHIVE_THREADS` | 默认归档，写 `0` 不归档 |
-| 同时存在的隔离任务数 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_MAX_WORKTREES` | 默认 4，超出的隔离任务排队 |
+| Codex 会话归档 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ARCHIVE_THREADS` | 默认归档，设为 `0` 时关闭 |
+| 隔离任务并发上限 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_MAX_WORKTREES` | 默认 4，超出的隔离任务排队 |
 | 状态行进度 | ccstatusline 的 custom-command | 命令 `node ~/.claude/skills/codex/flow/statusline.mjs`，开启 `preserveColors` |
 
 ## 📖 用法
 
-- **日常使用**：在对话中让 Claude「交给 Codex」，或说明有几个可以并行、分阶段的任务；Claude 按 [SKILL.md](SKILL.md) 选择模型、写计划并在后台启动。
-- **直接运行**：命令也可以在 Claude Code 会话中直接运行，面板只显示本会话派出的任务。
+- **日常使用**：在对话中要求 Claude 将任务交给 Codex，或说明有哪些可并行、分阶段的工作；Claude 依据 [SKILL.md](SKILL.md) 选择模型、编写计划并在后台启动。
+- **直接运行**：下列命令也可在 Claude Code 会话中直接执行，面板只显示本会话派发的任务。
 
 ```json
 {"name": "docs", "cwd": "/path/to/repos",
@@ -150,23 +122,22 @@ Claude Code 主对话
      {"label": "汇总", "model": "gpt-6-astra", "effort": "high", "prompt": "复核：\n{{phase:撰写}}"}]}]}
 ```
 
-- **调度**：「甲审查」写了 `after`，「甲文档」完成后立即开始；「汇总」没写，等整个撰写阶段结束。
-- **引用结果**：`{{task:名字}}` 换成单个任务的结果，`{{phase:标题}}` 换成整个阶段的结果。
-- **路径**：`promptFile` 和 `{{file:}}` 相对计划文件所在目录，任务的 `cwd` 相对计划的 `cwd`。
-- **可选字段**：`"writes": ["README.md"]` 限定修改范围，`"checks": ["<命令>"]` 指定验收命令，`"reads"` 写续跑时要关心的文件，`"isolation": "worktree"` 让任务在独立的 worktree 里运行。
-- **只给路径**：`{{path:名字}}` 换成该任务结果文件的路径，同样算作依赖。
+- **调度**：「甲审查」声明了 `after`，在「甲文档」完成后立即启动；「汇总」未声明，等待整个撰写阶段结束。
+- **结果引用**：`{{task:名字}}` 替换为单个任务的结果，`{{phase:标题}}` 替换为整个阶段的结果，`{{path:名字}}` 替换为结果文件路径；被引用的任务均视为前置任务。
+- **路径**：`promptFile` 与 `{{file:}}` 相对于计划文件所在目录，任务的 `cwd` 相对于计划的 `cwd`。
+- **可选字段**：`"writes": ["README.md"]` 限定写入范围，`"checks": ["<命令>"]` 指定验收命令，`"reads"` 指定续跑时检查变化的文件，`"isolation": "worktree"` 启用 worktree 隔离。
 
 | 命令 | 作用 |
 | --- | --- |
 | `run.sh -m <模型> -e <effort> "<任务>"` | 运行单个任务；`-r` 续接、`-f` 分叉、`-w` 使用新 worktree、`-j` 按 schema 返回 |
-| `flow/codex-flow.mjs run <plan.json>` | 按计划和任务依赖运行，flow 结束才退出，放在后台 Bash 中启动 |
-| `flow/codex-flow.mjs run --resume <runId> [--rerun <任务名>]` | 续跑，复用已完成且没过期的任务；`--rerun` 强制重跑，可重复 |
-| `flow/codex-flow.mjs stats <runId> [--json]` | 每个任务的说明组成、token 用量、回报大小和验收 |
-| `flow/codex-flow.mjs clean <runId>` | 删除该运行的成果分支（之后有新提交的不删）和残留 worktree |
+| `flow/codex-flow.mjs run <plan.json>` | 按计划与依赖运行，flow 结束后退出，在后台 Bash 中启动 |
+| `flow/codex-flow.mjs run --resume <runId> [--rerun <任务名>]` | 续跑，复用已完成且未过期的任务；`--rerun` 强制重跑，可重复 |
+| `flow/codex-flow.mjs stats <runId> [--json]` | 各任务的说明构成、token 用量、回报大小与验收结果 |
+| `flow/codex-flow.mjs clean <runId>` | 删除成果分支（之后有新提交的除外）与残留 worktree |
 | `flow/codex-flow.mjs status [runId]` | 查看本会话的运行记录 |
 | `flow/codex-flow.mjs cancel <runId> [任务名]` | 停止整个 flow 或其中一个任务 |
-| `flow/codex-flow.mjs steer <runId> <任务名> "<内容>"` | 向运行中的任务补充指示 |
-| `flow/codex-flow.mjs watch <runId>` | 有任务运行满提醒时长或 flow 结束时输出一行并退出 |
+| `flow/codex-flow.mjs steer <runId> <任务名> "<内容>"` | 向运行中的任务追加指示 |
+| `flow/codex-flow.mjs watch <runId>` | 任务运行达到提醒时长或 flow 结束时输出一行并退出 |
 
 `.mjs` 命令用 `node` 运行，路径相对于 `~/.claude/skills/codex`。计划字段的完整说明见 [SKILL.md](SKILL.md)。
 
@@ -175,18 +146,18 @@ Claude Code 主对话
 | 路径 | 用途 |
 | --- | --- |
 | [SETUP.md](SETUP.md) | 面向 Agent 的分步安装手册 |
-| [SKILL.md](SKILL.md) | 面向 Claude 的委派、选模型与排查规则 |
+| [SKILL.md](SKILL.md) | 面向 Claude 的委派、模型选择与排查规则 |
 | [run.sh](run.sh) | 单个任务入口 |
-| [flow/](flow/) | codex-flow 执行器、状态行脚本和测试 |
+| [flow/](flow/) | codex-flow 执行器、状态行脚本与测试 |
 | [mod/](mod/) | 任务面板 mod 及其测试 |
 | [agents/codex-runner.md](agents/codex-runner.md) | 在后台代跑常规任务的 Claude 子代理 |
 | [schemas/](schemas/) | 内置的 `review`、`opinion`、`result` 返回格式 |
-| [models.json](models.json) | 允许的模型和 effort，默认用 Fast 的模型 |
+| [models.json](models.json) | 允许的模型与 effort、默认使用 Fast 的模型 |
 
 ## 🤝 贡献须知
 
 欢迎提交兼容修复、功能改进与文档修订。提交 PR 前请注意：
 
 - **范围**：一个 PR 只解决一个问题，不夹带个人配置或无关的格式调整。
-- **测试**：改执行器后运行 `node --test flow/tests/`，改 mod 后运行 `claude plugin validate mod` 和 `claude plugin test mod`。执行器测试使用假 Codex 和临时目录，不调用真实 Codex。
+- **测试**：修改执行器后运行 `node --test flow/tests/`，修改 mod 后运行 `claude plugin validate mod` 与 `claude plugin test mod`。执行器测试使用模拟 Codex 与临时目录，不调用真实 Codex。
 - **信息保护**：提交前检查 diff、日志与截图，去除账号信息、私人路径与任务内容。
