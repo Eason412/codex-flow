@@ -1,6 +1,7 @@
 // Codex 对话归档，做法同 Claude Workflow 的子代理记录：全文保留（~/.codex/archived_sessions），但不出现在 Codex 桌面端的列表里。
 // app-server 开的对话 Codex 记为交互会话，不归档就会出现在桌面端的「最近」和「项目」里。CODEX_FLOW_ARCHIVE_THREADS=0 时不归档
 import { AppServer } from "./appserver.mjs";
+import { servers } from "./runtime.mjs";
 
 const ARCHIVE_TIMEOUT_MS = 5000;
 const archiving = () => process.env.CODEX_FLOW_ARCHIVE_THREADS !== "0";
@@ -34,7 +35,8 @@ export async function archiveLeftovers(state, timeoutMs) {
   if (!archiving() || (!tasks.length && !loose.length)) return;
   let server = null;
   const work = (async () => {
-    await AppServer.start({ cwd: state.cwd, onSpawn: (s) => { server = s; } });
+    // 一起来就登记进 servers：补归档期间收到停止信号时 onStop 会连它一起关掉
+    await AppServer.start({ cwd: state.cwd, onSpawn: (s) => { server = s; servers.add(s); } });
     for (const task of tasks) await archiveThread(server, task);
     for (const id of [...loose]) if (await archiveOne(server, id)) loose.splice(loose.indexOf(id), 1);
   })().catch(() => {});
@@ -42,4 +44,5 @@ export async function archiveLeftovers(state, timeoutMs) {
   await Promise.race([work, new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); })]);
   clearTimeout(timer);
   await server?.close();
+  servers.delete(server);
 }

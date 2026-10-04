@@ -288,6 +288,8 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   // 停止中关 app-server 会让启动中的任务提前结束，由 onStop 收尾和退出
   if (stopping) return new Promise(() => {});
   await archiveLeftovers(state, 15000);
+  // 补归档期间收到停止信号：由 onStop 收尾和退出
+  if (stopping) return new Promise(() => {});
   state.status = overallStatus(state.tasks);
   state.endedAt = nowIso();
   try {

@@ -104,6 +104,26 @@ test('停止时补归档的 app-server 不回应也不理 SIGTERM：到时强制
   }
 });
 
+test('正常收尾补归档时收到 SIGTERM：补归档的 app-server 也被关掉，退出后没有残留进程', async () => {
+  const { repo } = gitRepo();
+  const file = path.join(root, 'plan.json');
+  writeJson(file, plan(repo, [iso('甲', 'PATCH:a.md')]));
+  // 任务的 app-server 在 worktree 里，归档失败；补归档的 app-server 在仓库目录，initialize 不回应、不理 EOF 和 SIGTERM
+  const env = { FAKE_ARCHIVE: 'fail', FAKE_INIT: 'silent', FAKE_INIT_ONLY: repo, FAKE_IGNORE_EOF: '1', FAKE_IGNORE_TERM: '1', FAKE_RECORD_PIDS: '1' };
+  const { child, done } = background(['run', file], fakePath(env));
+  try {
+    for (let i = 0; i < 150 && lines(pidsFile()).length < 2; i++) await sleep(100);
+    assert.equal(lines(pidsFile()).length, 2, '补归档的 app-server 已起来');
+    child.kill('SIGTERM');
+    assert.equal((await done).code, 143);
+    const pids = lines(pidsFile()).map(Number);
+    assert.equal(pids.length, 3, '任务的、正常收尾补归档的、停止时补归档的');
+    assert.deepEqual(pids.filter(alive), []);
+  } finally {
+    for (const pid of lines(pidsFile()).map(Number)) if (alive(pid)) process.kill(pid, 'SIGKILL');
+  }
+});
+
 test('V0.3 的记录只重跑验收：已合回的在主工作区验收；没合回的成果从私有引用换成分支，在 worktree 里验收', () => {
   const { repo, git } = gitRepo();
   assert.equal(runPlan(plan(repo, [iso('甲', 'PATCH:a.md'), iso('乙', 'PATCH:b.md', { checks: ['false'] })])).status, 1);
