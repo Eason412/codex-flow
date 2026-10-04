@@ -1,6 +1,6 @@
 {
   "name": "codex-flow",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "/flow 面板查看和停止本会话派出的 Codex 任务，任务跑满 15 分钟时提醒主 Agent 排查",
   "types": "./types/index.d.ts"
 }
