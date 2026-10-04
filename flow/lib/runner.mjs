@@ -6,13 +6,14 @@ import { briefOf, isAlive, newRunId, nowIso, promptHash, pruneOldRuns, readJson,
 import { ALERT_AFTER, checkProcs, current, die, fileSafe, markStopping, save, servers, SESSION, setCurrent, stopping } from "./runtime.mjs";
 import { literal, loadPlan, loadSchema, renderPrompt, validatePlan, withContract } from "./plan.mjs";
 import { inScope, realPath } from "./scope.mjs";
-import { finishChecks, killGroup, recheckTask } from "./checks.mjs";
+import { killGroup, recheckTask } from "./checks.mjs";
 import { leaseOf, leases, overlapNotes } from "./leases.mjs";
 import { changedSources, changesSince, flowCwds, snapshotWorkspace, staleFiles } from "./freshness.mjs";
 import { measureInput, meterReport } from "./meter.mjs";
 import { recordCollisions } from "./collisions.mjs";
 import { runTask } from "./task.mjs";
-import { cleanRunArchives, closeActive, interruptedMerge, isolationFields } from "./isolation.mjs";
+import { cleanRunArchives, closeActive, isolationFields, isolationNotes } from "./isolation.mjs";
+import { archiveLeftovers } from "./threads.mjs";
 import { overallStatus, phaseStatus, renderSummary } from "./summary.mjs";
 
 export async function onStop(signal) {
@@ -42,6 +43,9 @@ export async function onStop(signal) {
   await Promise.race([Promise.all([...servers].map((server) => server.close())), new Promise((r) => setTimeout(r, 3000))]);
   // 到时还没退出的直接强制结束，父进程退出后就没人再管它们了
   for (const server of servers) server.proc?.kill("SIGKILL");
+  // 被停掉的任务的 Codex 对话没来得及归档，另起一个 app-server 补上，最多等 4 秒
+  await Promise.race([archiveLeftovers(state), new Promise((r) => setTimeout(r, 4000))]);
+  save();
   // Codex 都停了再收尾隔离任务（存成果、删目录），汇总写的是收尾后的实际去留
   closeActive();
   const summary = renderSummary(current.dir, state);
@@ -153,11 +157,6 @@ function populateFlowTasks(dir, state, previous, planTasks, deps, rerun, notes) 
   const tierOf = (model) => (serviceTierOf(model) ? { serviceTier: serviceTierOf(model) } : {});
   for (const [label, t] of planTasks) {
     const old = previous?.tasks?.find((o) => o.label === label);
-    // 上次合回写主工作区时中断的隔离任务：不复用、不重跑，记为失败等人工核对
-    if (old?.merge?.state === "applying") {
-      state.tasks.push(interruptedMerge(old, t.phase));
-      continue;
-    }
     const contract = { writes: t.writes, checks: t.checks, ...(t.reads ? { reads: t.reads } : {}), ...isolationFields(t) };
     const staleRerun = old?.status === "completed" && readOnly(t) && staleFor(label).length ? { staleRerun: staleFor(label) } : {};
     state.tasks.push(canReuse(label)
@@ -179,23 +178,12 @@ function promptFor(dir, state, task, t) {
   return text;
 }
 
-// 和别的任务改了同一个文件、且对方已经先结束的：在主工作区重新跑对方的验收
-async function recheckCollision(dir, state, other, label) {
-  other.status = "running";
-  save();
-  await finishChecks(dir, other, other.cwd ?? state.cwd, path.join(dir, "control", `${fileSafe(other.label)}.stop`));
-  const entry = other.collisions?.find((c) => c.with === label);
-  if (entry) entry.rechecked = true;
-  if (other.status === "failed") other.error = `和「${label}」改了同一批文件后重新验收失败：${other.error}`;
-}
-
 // 任务结束后：释放写入租约，记回报大小，查实际碰撞
 async function afterTask(dir, state, task) {
   leases.release(task.label);
   try {
     meterReport(dir, task);
-    const recheck = recordCollisions(state, task);
-    if (!stopping) for (const other of recheck) await recheckCollision(dir, state, other, task.label);
+    recordCollisions(state, task);
   } catch {
     // 计量和碰撞检查出错不影响任务结果
   }
@@ -222,14 +210,6 @@ function scheduleTasks(dir, state, planTasks, deps) {
           if (before.length && !before.some((t) => t.status === "completed")) {
             task.status = "skipped";
             task.error = "前置任务都没有完成";
-            changed = true;
-            continue;
-          }
-          // 隔离任务的改动只有合回成功（completed）才在主工作区里，没合回就不能让下游当作已经有了
-          const unmerged = before.filter((t) => planTasks.get(t.label).isolation === "worktree" && t.status !== "completed");
-          if (unmerged.length) {
-            task.status = "skipped";
-            task.error = `隔离的前置任务没有合回：${unmerged.map((t) => t.label).join("、")}`;
             changed = true;
             continue;
           }
@@ -287,11 +267,13 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   save();
   process.stdout.write(`[codex-flow] ${plan.name} 开始 · ${state.runId}\n`);
   const toRun = state.tasks.filter((t) => t.status === "pending" && !t.recheck).map((t) => ({ ...planTasks.get(t.label), cwd: planTasks.get(t.label).cwd ?? state.cwd }));
-  for (const line of [...overlapNotes(toRun, deps), ...notes]) process.stderr.write(`[codex-flow] ${line}\n`);
+  const planned = [...planTasks.values()];
+  for (const line of [...overlapNotes(toRun, deps), ...isolationNotes(planned, deps), ...notes]) process.stderr.write(`[codex-flow] ${line}\n`);
 
   await scheduleTasks(dir, state, planTasks, deps);
   // 停止中关 app-server 会让启动中的任务提前结束，由 onStop 收尾和退出
   if (stopping) return new Promise(() => {});
+  await archiveLeftovers(state);
   state.status = overallStatus(state.tasks);
   state.endedAt = nowIso();
   try {

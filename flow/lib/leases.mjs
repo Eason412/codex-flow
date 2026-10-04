@@ -1,4 +1,4 @@
-// 写入租约：写入范围重叠的任务不同时运行，后开始的排队等前一个结束；隔离任务合回主工作区时也按改动文件取租约。
+// 写入租约：写入范围重叠的任务不同时运行，后开始的排队等前一个结束（效果等于给它们加了 after）。
 // 只有声明了非空 writes 的任务有租约；没写 writes 的任务范围不明，照常并行，只在开始时提示（见 overlapNotes）
 import path from "node:path";
 import { realPath } from "./scope.mjs";
@@ -28,19 +28,16 @@ export function overlapOf(a, b) {
   return [...out].sort();
 }
 
-// 运行中的租约和排队中的合回。调度器开任务前问 blockers，没有才 hold；合回用 acquire 排队，按先来后到唤醒。
-// blockers 也算上排队中的合回，免得新任务不断插队让合回一直等
+// 运行中的租约。调度器开任务前问 blockers，没有才 hold，任务结束时 release 后调度器再看排队的任务
 export class Leases {
   constructor() {
     this.held = new Map();
-    this.queue = [];
   }
 
   blockers(lease, self = null) {
     if (!lease) return [];
     const names = [];
     for (const [name, held] of this.held) if (name !== self && overlapOf(held, lease).length) names.push(name);
-    for (const w of this.queue) if (w.name !== self && overlapOf(w.lease, lease).length) names.push(w.name);
     return names;
   }
 
@@ -49,42 +46,7 @@ export class Leases {
   }
 
   release(name) {
-    if (this.held.delete(name)) this.wake();
-  }
-
-  // 排队取租约：取到时得到 true，排队中被 cancel 撤下时得到 false
-  acquire(name, lease) {
-    if (!lease) return Promise.resolve(true);
-    return new Promise((resolve) => {
-      this.queue.push({ name, lease, resolve });
-      this.wake();
-    });
-  }
-
-  cancel(name) {
-    const i = this.queue.findIndex((w) => w.name === name);
-    if (i < 0) return;
-    const [w] = this.queue.splice(i, 1);
-    w.resolve(false);
-    this.wake();
-  }
-
-  // name 持有的租约是否已覆盖 lease 的每一条路径
-  covers(name, lease) {
-    const held = this.held.get(name) ?? [];
-    return (lease ?? []).every((p) => held.some((h) => within(p, h)));
-  }
-
-  wake() {
-    for (let i = 0; i < this.queue.length; i++) {
-      const w = this.queue[i];
-      const busy = [...this.held.values()].some((held) => overlapOf(held, w.lease).length)
-        || this.queue.slice(0, i).some((ahead) => overlapOf(ahead.lease, w.lease).length);
-      if (busy) continue;
-      this.queue.splice(i--, 1);
-      this.held.set(w.name, w.lease);
-      w.resolve(true);
-    }
+    this.held.delete(name);
   }
 }
 

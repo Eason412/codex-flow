@@ -1,7 +1,7 @@
 // 根据运行状态与结果文件生成终端汇总和任务结论，统一阶段及整体状态口径。
 import fs from "node:fs";
 import path from "node:path";
-import { effectiveStatus, elapsedSeconds, formatDuration } from "./state.mjs";
+import { effectiveStatus, elapsedSeconds, formatDuration, keepDaysOf } from "./state.mjs";
 import { here } from "./runtime.mjs";
 import { isolationLines } from "./isolation.mjs";
 
@@ -26,7 +26,7 @@ export function overallStatus(tasks) {
 }
 
 // 隔离任务这几类失败的原因由 isolationLines 写出，不再另起一行
-const SELF_EXPLAINED = ["conflict", "mismatch", "interrupted", "merge", "archive"];
+const SELF_EXPLAINED = ["archive"];
 
 // 注入的上游结果超过这个字数就提示改用 {{path:}}：大段结果塞进任务说明会挤占上下文
 const INJECT_WARN = 8000;
@@ -82,6 +82,14 @@ export function conclusionOf(dir, task) {
   return (paragraph.length ? paragraph : heading ? [heading] : []).slice(0, 3).map(clip);
 }
 
+// 运行记录的去留：没有定时任务，过了保留期后，下一次 codex-flow 跑完时删除
+function retention(state) {
+  const days = keepDaysOf(state);
+  const until = new Date(Date.parse(state.endedAt ?? state.startedAt) + days * 86400000);
+  const date = `${until.getFullYear()}-${String(until.getMonth() + 1).padStart(2, "0")}-${String(until.getDate()).padStart(2, "0")}`;
+  return `保留 ${days} 天，${date} 之后下一次运行 codex-flow 时删除`;
+}
+
 export function renderSummary(dir, state) {
   const status = effectiveStatus(state);
   const lines = [
@@ -106,7 +114,7 @@ export function renderSummary(dir, state) {
     if (t.scope?.outside?.length) lines.push(`    ⚠ 越界写入：${list(t.scope.outside)}`);
     if (t.scope?.unclaimed?.length) lines.push(`    ⚠ 范围外变动，来源未定${t.scope.duringChecks ? "（期间有其他任务在跑验收）" : ""}：${list(t.scope.unclaimed)}`);
     for (const line of isolationLines(t)) lines.push(`    ${line}`);
-    for (const c of t.collisions ?? []) lines.push(`    ⚠ 和「${c.with}」同时改了：${list(c.files)}${c.rechecked ? "（已重新验收）" : ""}`);
+    for (const c of t.collisions ?? []) lines.push(`    ⚠ 和「${c.with}」同时改了：${list(c.files)}；先结束的那个验收时还没看到对方的改动，需要时重跑它`);
     if (t.reused && t.stale?.length) lines.push(`    ⚠ 复用的结果之后这些文件改过：${list(t.stale)}；要重跑加 --rerun ${t.label}`);
     if (t.staleRerun?.length) lines.push(`    上次结果之后这些文件改过，已重跑：${list(t.staleRerun)}`);
     if ((t.input?.upstream?.chars ?? 0) > INJECT_WARN) lines.push(`    注入上游结果 ${t.input.upstream.chars} 字，可改用 {{path:任务名}} 让 Codex 自己读`);
@@ -119,7 +127,7 @@ export function renderSummary(dir, state) {
     for (const line of conclusion) lines.push(`    ${line}`);
   }
   for (const note of state.notes ?? []) lines.push(`⚠ ${note}`);
-  lines.push(`运行目录: ${dir}`);
+  lines.push(`运行目录: ${dir}（${retention(state)}）`);
   if (state.kind === "flow" && status !== "completed") lines.push(`续跑: node ${path.join(here, "codex-flow.mjs")} run --resume ${state.runId}`);
   return `${lines.join("\n")}\n`;
 }

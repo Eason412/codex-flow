@@ -133,11 +133,12 @@ export function briefOf(text, limit = 80) {
 export const promptHash = (task) =>
   crypto.createHash("sha256").update(JSON.stringify([task.prompt, task.model, task.effort, task.schema ?? null])).digest("hex").slice(0, 16);
 
-const ARCHIVE_DAYS = 30; // 含隔离任务没合回的成果（私有引用）的运行记录保留更久
+const ARCHIVE_DAYS = 30; // 含隔离任务成果分支的运行记录保留更久
+export const keepDaysOf = (state) => (hasArchive(state) ? ARCHIVE_DAYS : 7);
 
-// 运行记录里还有隔离任务没合回的成果（私有引用）或保留的 worktree
+// 运行记录里还有隔离任务的成果分支或保留的 worktree（V0.3 的记录：没合回的私有引用）
 export const hasArchive = (state) =>
-  (state?.tasks ?? []).some((t) => t.isolation === "worktree" && (t.worktree || (t.merge?.result && t.merge.state !== "applied")));
+  (state?.tasks ?? []).some((t) => t.isolation === "worktree" && (t.worktree || t.branch?.tip || (t.merge?.result && t.merge.state !== "applied")));
 
 // 删掉 7 天前结束的记录、开始超过 7 天且进程已不在的记录，以及超过 7 天未登记的目录。
 // 含没合回成果的记录保留 30 天，到期由 cleanArchive 先删它的私有引用和残留 worktree 再删目录；没给 cleanArchive 的调用方跳过这类记录

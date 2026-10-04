@@ -203,7 +203,7 @@ export function withContract(prompt, task) {
     lines.push("你结束后执行器会在工作目录依次运行下面的验收命令，全部退出码为 0 才算完成：", ...task.checks.map((c) => `- ${c}`));
   }
   if (task.isolation === "worktree") {
-    lines.push("工作目录是执行器为本任务建的独立 git worktree，结束且验收通过后执行器把整份改动合回主工作区（有超出写入范围的改动就整份不合回）；不要 commit、stash 或切换分支。node_modules、.venv、venv 是指回主工作区的链接，写进去会落到主工作区；其余被忽略的文件不在这里。");
+    lines.push("工作目录是执行器为本任务建的独立 git worktree，结束后执行器把改动存成一个分支，不合回主工作区；不要 commit、stash 或切换分支。node_modules、.venv、venv 是指回主工作区的链接，写进去会落到主工作区；其余被忽略的文件不在这里。");
   }
   return lines.length ? `${prompt}\n\n---\ncodex-flow 约束：\n${lines.join("\n")}` : prompt;
 }

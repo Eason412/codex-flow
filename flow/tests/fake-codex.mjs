@@ -21,6 +21,8 @@ if (args[0] === 'app-server') {
       if (initMode === 'error') send({ id: request.id, error: { code: -32600, message: '假初始化被拒' } });
       return;
     }
+    // 归档请求记到 $CODEX_HOME/fake-archived，测试据此核对
+    if (request.method === 'thread/archive') fs.appendFileSync(path.join(process.env.CODEX_HOME, 'fake-archived'), `${request.params.threadId}\n`);
     let result = {};
     // 插话里带 REJECT 时像 turn 已结束那样回错误
     if (request.method === 'turn/steer' && JSON.stringify(request.params).includes('REJECT')) return send({ id: request.id, error: { code: -32600, message: '假插话被拒' } });

@@ -1,4 +1,4 @@
-// 隔离任务留下的私有引用（refs/codex-flow/<runId>/…）和 worktree 的删除：任务收尾、clean 命令和过期运行记录清理共用。
+// 隔离任务留下的成果分支、worktree 和 V0.3 的私有引用（refs/codex-flow/<runId>/…）的删除：任务收尾、clean 命令和过期运行记录清理共用。
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -57,13 +57,26 @@ export function dropRefs(repo, prefix) {
   return refs.length;
 }
 
-// 删掉一次运行的全部私有引用和残留 worktree（只删带本运行标记的），返回 { refs, worktrees }
+// 删掉一次运行的成果分支（只删仍停在成果提交上的，之后有新提交的留下）、V0.3 的私有引用和残留 worktree（只删带本运行标记的），
+// 返回 { branches, kept, worktrees }
 export function cleanArchives(state, worktreesRoot) {
   const runId = state.runId;
   const tasks = state.tasks ?? [];
-  let refs = 0;
+  let branches = 0;
+  const kept = [];
+  for (const t of tasks) {
+    const b = t.branch;
+    if (!b?.tip || !fs.existsSync(b.repo)) continue;
+    const ref = `refs/heads/${b.name}`;
+    const now = git(b.repo, ["rev-parse", "--verify", "-q", ref]).stdout.trim();
+    if (now === b.tip) {
+      // 带旧值删除：比较和删除一步完成，期间有人提交就删不掉
+      if (git(b.repo, ["update-ref", "-d", ref, b.tip]).status === 0) branches++;
+      else kept.push(b.name);
+    } else if (now) kept.push(b.name);
+  }
   for (const repo of new Set(tasks.flatMap((t) => [t.merge?.repo, t.worktree?.repo]).filter(Boolean))) {
-    if (fs.existsSync(repo)) refs += dropRefs(repo, `refs/codex-flow/${runId}`);
+    if (fs.existsSync(repo)) dropRefs(repo, `refs/codex-flow/${runId}`);
   }
   const links = new Map(tasks.filter((t) => t.worktree).map((t) => [t.worktree.path, t.worktree.links ?? []]));
   const base = path.join(worktreesRoot, runId);
@@ -75,5 +88,5 @@ export function cleanArchives(state, worktreesRoot) {
     removeWorktree(common || wt, wt, links.get(wt));
     worktrees++;
   }
-  return { refs, worktrees };
+  return { branches, kept, worktrees };
 }

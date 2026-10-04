@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { nowIso } from "./state.mjs";
 import { checkProcs, checkWindows, fileSafe, save, stopping } from "./runtime.mjs";
-import { closeWorktree, mergeBack, reopenWorktree, scopeOk } from "./isolation.mjs";
+import { closeWorktree, noteScope, reopenWorktree } from "./isolation.mjs";
 
 const CHECK_TIMEOUT = (Number(process.env.CODEX_FLOW_CHECK_TIMEOUT) > 0 ? Number(process.env.CODEX_FLOW_CHECK_TIMEOUT) : 600) * 1000;
 const CHECK_LOG_LIMIT = 1 << 20; // 每条验收命令最多记 1MB 输出
@@ -137,7 +137,7 @@ export async function finishChecks(dir, task, cwd, stopFile) {
 }
 
 // 续跑时只改了验收命令：复用 Codex 结果，只重跑验收。
-// 隔离任务的成果还没合回：按 result 引用重建 worktree，按这次计划的 writes 重查范围，在里面验收，通过再合回；引用不在或越界就记为失败
+// 隔离任务：按上次存下的成果重建 worktree，按这次计划的 writes 重查范围，在里面验收；成果提交已不在就记为失败
 export async function recheckTask(dir, task, cwd) {
   const stopFile = path.join(dir, "control", `${fileSafe(task.label)}.stop`);
   task.status = "running";
@@ -146,17 +146,15 @@ export async function recheckTask(dir, task, cwd) {
   save();
   let iso = null;
   try {
-    if (task.isolation === "worktree" && task.merge?.state !== "applied") {
+    if (task.isolation === "worktree") {
       iso = reopenWorktree(dir, task, cwd);
-      scopeOk(task, iso);
+      noteScope(task, iso);
     }
   } catch (error) {
     Object.assign(task, { status: "failed", failureKind: "archive", error: error.message });
   }
   if (task.status === "running") {
-    const failure = await checkTask(dir, task, iso?.wtCwd ?? cwd, stopFile);
-    if (iso && !failure) await mergeBack(dir, task, iso, () => finishChecks(dir, task, cwd, stopFile));
-    else settleChecks(task, failure);
+    settleChecks(task, await checkTask(dir, task, iso?.wtCwd ?? cwd, stopFile));
   }
   if (iso) closeWorktree(task, iso);
   delete task.recheck;

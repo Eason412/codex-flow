@@ -40,19 +40,19 @@ test('没写 writes 的任务照常并行，和有写入范围的任务在同一
   assert.doesNotMatch(result.stderr, /「读」/);
 });
 
-test('同时运行的任务改了同一个文件：两边记下碰撞，先结束的在主工作区重新验收', () => {
+test('同时运行的任务改了同一个文件：两边记下碰撞并在汇总提示，不自动重新验收，由 Claude 判断', () => {
   const { repo } = gitRepo();
   const result = runPlan({ name: '碰撞', cwd: repo, phases: [{ title: '一', tasks: [
     { label: '快', ...sol, writes: ['e'], checks: ['test ! -f late.flag'], prompt: 'PATCH:shared.md' },
     { label: '慢', ...sol, writes: ['l'], prompt: 'SLOW PATCH:shared.md PATCH:late.flag' },
   ] }] });
-  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
   const { state } = lastRun();
-  assert.deepEqual(taskOf(state, '快').collisions, [{ with: '慢', files: ['shared.md'], rechecked: true }]);
+  assert.deepEqual(taskOf(state, '快').collisions, [{ with: '慢', files: ['shared.md'] }]);
   assert.deepEqual(taskOf(state, '慢').collisions, [{ with: '快', files: ['shared.md'] }]);
-  assert.equal(taskOf(state, '快').status, 'failed');
-  assert.match(taskOf(state, '快').error, /^和「慢」改了同一批文件后重新验收失败：验收未通过：test ! -f late\.flag/);
-  assert.match(result.stdout, /⚠ 和「慢」同时改了：shared\.md（已重新验收）/);
+  assert.equal(taskOf(state, '快').status, 'completed', '不重跑验收，状态不变');
+  assert.equal(taskOf(state, '快').checkResults.length, 1);
+  assert.match(result.stdout, /⚠ 和「慢」同时改了：shared\.md；先结束的那个验收时还没看到对方的改动，需要时重跑它/);
 });
 
 test('任务说明按五部分计量，{{path:}} 给结果文件路径并算作依赖，回报记字数；stats 文本与 JSON', () => {

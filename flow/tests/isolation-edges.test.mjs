@@ -1,6 +1,5 @@
-// 隔离与续跑的边界（审查时复现过的问题）：任务名归一化后重名、writes 写 "." 越到父目录、强制暂存的被忽略文件、
-// 受管链接的上级被换成链接、git apply 只应用了一部分、续跑按新 writes 重查、停止与单独取消时不合回、
-// 合回按实际要写的文件取租约、连续续跑保留过期提示
+// 隔离、停止与续跑的边界（审查时复现过的问题）：任务名归一化后重名、writes 写 "." 越到父目录、强制暂存的被忽略文件、
+// 受管链接的上级被换成链接、停止的几个时间窗口、连续续跑保留过期提示，以及 Codex 对话归档
 import { root, RUNS, sol, sleep, runPlan, lastRun, taskOf, gitRepo, fakePath, background, command, readJson, writeJson, statePath } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,27 +63,26 @@ test('writes 写 "." 只覆盖任务 cwd 及其下：写到父目录算越界', 
   const { repo } = gitRepo('repo', { 'pkg/x.md': '原\n', 'outside.md': '外\n' });
   const pkg = path.join(repo, 'pkg');
   const r = runPlan(plan(repo, [iso('甲', 'PATCH:x.md PATCH:../outside.md', { cwd: pkg, writes: ['.'] })]));
-  assert.equal(r.status, 1, r.stdout + r.stderr);
-  const t = taskOf(lastRun().state, '甲');
-  assert.equal(t.failureKind, 'outside');
-  assert.deepEqual(t.scope.outside, ['../outside.md']);
-  assert.equal(read(repo, 'outside.md'), '外\n');
-  assert.equal(read(pkg, 'x.md'), '原\n', '整份不合回');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(taskOf(lastRun().state, '甲').scope.outside, ['../outside.md']);
   runPlan(plan(repo, [{ label: '乙', ...sol, cwd: pkg, writes: ['.'], prompt: 'PATCH:../outside.md' }]));
   assert.deepEqual(taskOf(lastRun().state, '乙').scope?.outside, ['../outside.md']);
 });
 
-test('主工作区强制暂存的被忽略文件：隔离任务没碰时不会被删，改了时按改后的内容合回；主仓库 index 不变', () => {
+test('主工作区强制暂存的被忽略文件：隔离任务没碰时不算删除，改了时成果里是改后的内容；主仓库 index 不变', () => {
   const { repo, git } = gitRepo('repo', { '.gitignore': '*.secret\n', 'x.md': '原\n' });
   fs.writeFileSync(path.join(repo, 'config.secret'), '密\n');
   git('add', '-f', 'config.secret');
   let r = runPlan(plan(repo, [iso('甲', 'PATCH:x.md')]));
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.equal(read(repo, 'config.secret'), '密\n');
-  assert.deepEqual(taskOf(lastRun().state, '甲').merge.files, ['x.md']);
+  let b = taskOf(lastRun().state, '甲').branch;
+  assert.deepEqual(b.files, ['x.md']);
+  assert.equal(git('diff', '--name-only', b.base, b.name), 'x.md\n', '没有被当成删除');
   r = runPlan(plan(repo, [iso('乙', 'SHELL:config.secret')]));
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(read(repo, 'config.secret'), /^写入 /);
+  b = taskOf(lastRun().state, '乙').branch;
+  assert.match(git('show', `${b.name}:config.secret`), /^写入 /);
+  assert.equal(read(repo, 'config.secret'), '密\n');
   assert.equal(git('diff', '--cached', '--name-only'), 'config.secret\n');
 });
 
@@ -102,70 +100,26 @@ test('删 worktree 时受管链接的上级被换成指回主工作区的链接�
   assert.equal(exists(wt), false);
 });
 
-test('git apply 只应用了一部分（主工作区子目录不可写）：记为合回中断，保留 worktree 和引用', { skip: process.getuid?.() === 0 }, () => {
-  const { repo } = gitRepo('repo', { 'a.md': '原\n', 'z/f.md': '原\n' });
-  const z = path.join(repo, 'z');
-  try {
-    const r = runPlan(plan(repo, [iso('甲', 'PATCH:a.md PATCH:z/f.md', { checks: [`chmod a-w ${z}`] })]));
-    assert.equal(r.status, 1, r.stdout + r.stderr);
-    const t = taskOf(lastRun().state, '甲');
-    assert.equal(t.failureKind, 'interrupted');
-    assert.equal(t.merge.state, 'applying');
-    assert.ok(t.merge.before && t.merge.merged, '保留 M、R 引用供核对');
-    assert.ok(t.worktree && exists(t.worktree.path), 'worktree 保留');
-    assert.match(r.stdout, /合回中断/);
-    assert.doesNotMatch(r.stdout, /整份成果没合回/);
-  } finally {
-    fs.chmodSync(z, 0o755);
-  }
-});
-
-test('续跑只重跑验收时按新的 writes 重查隔离成果：新范围不含的改动整份不合回', () => {
-  const { repo } = gitRepo('repo', { 'a.md': '原\n' });
-  assert.equal(runPlan(plan(repo, [iso('甲', 'PATCH:a.md', { writes: ['a.md'], checks: ['false'] })])).status, 1);
-  const { state } = lastRun();
-  const again = runPlan(plan(repo, [iso('甲', 'PATCH:a.md', { writes: [], checks: ['true'] })]), ['--resume', state.runId]);
-  assert.equal(again.status, 1, again.stdout + again.stderr);
-  const t = taskOf(lastRun().state, '甲');
-  assert.equal(t.failureKind, 'outside');
-  assert.deepEqual(t.scope.outside, ['a.md']);
-  assert.equal(read(repo, 'a.md'), '原\n');
-});
-
-test('等合回租约时被单独取消：不合回，记为已停止，成果留在引用里', async () => {
-  const { repo } = gitRepo('repo', { 'a.md': '原\n' });
-  const { done } = start([
-    { label: '甲', ...sol, writes: ['a.md'], prompt: '甲', checks: ['sleep 3'] },
-    iso('乙', 'PATCH:a.md', { writes: ['a.md'] }),
-  ], repo);
-  const { dir, state } = await waitState((s) => taskOf(s, '乙')?.merging);
-  assert.equal(command(['cancel', state.runId, '乙']).status, 0);
-  const { code, stdout } = await done;
-  const after = readJson(statePath(dir));
-  const t = taskOf(after, '乙');
-  assert.equal(t.status, 'cancelled', stdout);
-  assert.equal(code, 1);
-  assert.equal(read(repo, 'a.md'), '原\n');
-  assert.ok(t.merge.result, '成果留在引用里');
-  assert.equal(taskOf(after, '甲').status, 'completed');
-});
-
-test('整个停止时：等合回的隔离任务不再合回，验收被杀的任务仍记为已停止，等 app-server 退出后以 143 结束', async () => {
+test('整个停止时：验收被杀的任务仍记为已停止，等不理 SIGTERM 的 app-server 退出后以 143 结束；隔离任务已写的部分存成分支', async () => {
   const { repo } = gitRepo('repo', { 'a.md': '原\n' });
   const { done } = start([
     { label: '甲', ...sol, writes: ['a.md'], prompt: '甲', checks: ['sleep 5'] },
-    iso('乙', 'PATCH:a.md', { writes: ['a.md'] }),
+    iso('乙', 'SLOW PATCH:b.md', { writes: ['b.md'] }),
     { label: '丙', ...sol, writes: [], prompt: 'SLOW STUBBORN' },
   ], repo, { FAKE_SLOW_MS: '20000' });
-  const { dir, state } = await waitState((s) => taskOf(s, '乙')?.merging && taskOf(s, '甲')?.checking);
-  process.kill(state.pid, 'SIGTERM');
-  const { code, stdout } = await done;
-  assert.equal(code, 143, stdout);
-  const after = readJson(statePath(dir));
-  assert.deepEqual(after.tasks.map((t) => [t.label, t.status]), [['甲', 'cancelled'], ['乙', 'cancelled'], ['丙', 'cancelled']]);
-  assert.equal(read(repo, 'a.md'), '原\n', '乙没合回');
-  assert.ok(taskOf(after, '乙').merge.result);
-  assert.deepEqual(stubborn().filter(alive), [], 'app-server 都已退出');
+  try {
+    const { dir, state } = await waitState((s) => taskOf(s, '甲')?.checking && taskOf(s, '乙')?.worktree && fs.existsSync(pidsFile()));
+    fs.writeFileSync(path.join(taskOf(state, '乙').worktree.path, 'b.md'), '一半\n');
+    process.kill(state.pid, 'SIGTERM');
+    const { code, stdout } = await done;
+    assert.equal(code, 143, stdout);
+    const after = readJson(statePath(dir));
+    assert.deepEqual(after.tasks.map((t) => [t.label, t.status]), [['甲', 'cancelled'], ['乙', 'cancelled'], ['丙', 'cancelled']]);
+    assert.deepEqual(taskOf(after, '乙').branch.files, ['b.md']);
+    assert.deepEqual(stubborn().filter(alive), [], 'app-server 都已退出');
+  } finally {
+    killAll();
+  }
 });
 
 test('Codex 已结束、app-server 还在关闭时整个停止：等它真正退出再以 143 结束', async () => {
@@ -210,22 +164,6 @@ test('Codex 刚结束、验收还没开始时整个停止：不再启动验收�
   }
 });
 
-test('合回按三方合并后实际要写的文件取租约：主工作区把文件改了名、新名字被运行中任务占着时等它结束', async () => {
-  const { repo } = gitRepo('repo', { 'a.md': paragraphs });
-  const { done } = start([
-    { label: '甲', ...sol, writes: ['b.md'], prompt: '甲', checks: ['sleep 4; ! grep -q 乙改 b.md'] },
-    iso('乙', 'SLOW EDIT:a.md:第2段:乙改', { writes: ['a.md'] }),
-  ], repo, { FAKE_SLOW_MS: '1500' });
-  await waitState((s) => taskOf(s, '乙')?.worktree && taskOf(s, '甲')?.checking);
-  fs.renameSync(path.join(repo, 'a.md'), path.join(repo, 'b.md'));
-  const { code, stdout } = await done;
-  assert.equal(code, 0, stdout);
-  const after = lastRun().state;
-  assert.equal(taskOf(after, '甲').status, 'completed', '甲验收期间 b.md 没被合回改动');
-  assert.deepEqual(taskOf(after, '乙').merge.files, ['b.md'], '记的是实际写入的文件');
-  assert.match(read(repo, 'b.md'), /^乙改$/m);
-});
-
 test('连续续跑：写入任务复用的结果仍过期时保留提示，重跑后才清掉', () => {
   const { repo } = gitRepo('repo', { 'w.md': '原\n' });
   const p = plan(repo, [{ label: '写', ...sol, writes: ['w.md'], prompt: 'PATCH:w.md' }]);
@@ -239,6 +177,29 @@ test('连续续跑：写入任务复用的结果仍过期时保留提示，重�
   assert.match(second.stdout, /⚠ 复用的结果之后这些文件改过：w\.md/);
   runPlan(p, ['--resume', state.runId, '--rerun', '写']);
   assert.equal(taskOf(lastRun().state, '写').stale, undefined);
+});
+
+const archived = () => (fs.existsSync(path.join(process.env.CODEX_HOME, 'fake-archived')) ? read(process.env.CODEX_HOME, 'fake-archived').split('\n').filter(Boolean).length : 0);
+
+test('Codex 对话默认在任务结束时归档（不进 Codex 桌面端的列表）；CODEX_FLOW_ARCHIVE_THREADS=0 时不归档', () => {
+  const { repo } = gitRepo('repo');
+  const p = plan(repo, [{ label: '甲', ...sol, prompt: '甲' }, iso('乙', 'PATCH:a.md'), { label: '丙', ...sol, prompt: 'FAIL' }]);
+  runPlan(p);
+  assert.equal(archived(), 3, '完成、隔离、失败的都归档');
+  assert.ok(lastRun().state.tasks.every((t) => t.threadArchived));
+  fs.rmSync(path.join(process.env.CODEX_HOME, 'fake-archived'));
+  runPlan(p, [], fakePath({ CODEX_FLOW_ARCHIVE_THREADS: '0' }));
+  assert.equal(archived(), 0);
+});
+
+test('整个停止时：被停掉的任务的对话在 app-server 关掉后补归档', async () => {
+  const { repo } = gitRepo('repo');
+  const { done } = start([{ label: '甲', ...sol, prompt: 'SLOW' }], repo, { FAKE_SLOW_MS: '20000' });
+  const { dir, state } = await waitState((s) => s.tasks[0]?.threadId);
+  process.kill(state.pid, 'SIGTERM');
+  assert.equal((await done).code, 143);
+  assert.equal(archived(), 1);
+  assert.equal(readJson(statePath(dir)).tasks[0].threadArchived, true);
 });
 
 // 放在最后：标记停止会影响同一进程里之后的测试

@@ -8,7 +8,8 @@ import { loadSchema } from "./plan.mjs";
 import { gitSnapshot, realPath, scopeReport } from "./scope.mjs";
 import { oneLine, TaskActivity } from "./activity.mjs";
 import { checkTask, finishChecks, settleChecks } from "./checks.mjs";
-import { closeWorktree, judgeResult, mergeBack, openWorktree } from "./isolation.mjs";
+import { closeWorktree, judgeResult, openWorktree } from "./isolation.mjs";
+import { archiveThread } from "./threads.mjs";
 
 const SCOPE_SETTLE_MS = 300; // 拍结束快照前等其他任务的改文件记录到齐
 
@@ -176,14 +177,11 @@ function writeTaskResult(run) {
   task.result = path.relative(dir, resultFile);
 }
 
-// 隔离任务的 Codex 正常结束：存成果、核对范围，在 worktree 里验收，通过再合回；整个过程保持运行中，最终状态由验收或合回决定。
-// 合并结果不是验收过的内容时，在主工作区（原 cwd）再验收
+// 隔离任务的 Codex 正常结束：存成果、核对范围，在 worktree 里验收；成果留在分支上，不合回主工作区
 async function finishIsolated(run) {
   const { dir, task, iso, stopFile } = run;
   if (!judgeResult(task, iso)) return;
-  const failure = await checkTask(dir, task, iso.wtCwd, stopFile);
-  if (failure) settleChecks(task, failure);
-  else await mergeBack(dir, task, iso, () => finishChecks(dir, task, iso.cwd, stopFile));
+  settleChecks(task, await checkTask(dir, task, iso.wtCwd, stopFile));
 }
 
 async function finishTurn(run, end) {
@@ -212,7 +210,7 @@ async function finishTurn(run, end) {
     task.error = end.error || `turn ${end.status}`;
     task.failureKind = "execution";
   }
-  // 失败或被停掉的任务也可能已经写了文件；隔离任务的改动只在 worktree 里，收尾时存进引用
+  // 失败或被停掉的任务也可能已经写了文件；隔离任务的改动只在 worktree 里，收尾时存成分支
   if (end.status !== "completed" && task.writes && !run.iso) task.scope = scopeReport(state, task, cwd, touched, before, before ? gitSnapshot(cwd) : null);
   if (run.iso) closeWorktree(task, run.iso);
   // 面板刷新有几秒延迟，验收期间可能又写进来插话
@@ -252,6 +250,7 @@ export async function runTask(dir, state, task, prompt, cwd) {
   const poll = startControlPoll(run);
   const end = await run.turnDone;
   clearInterval(poll);
+  await archiveThread(run.server, task);
   await run.server.close();
   servers.delete(run.server);
   await finishTurn(run, end);
