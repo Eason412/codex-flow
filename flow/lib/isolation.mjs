@@ -5,10 +5,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { HOME, isAlive, readJson, runDir, statePath, writeJson } from "./state.mjs";
-import { die, save } from "./runtime.mjs";
+import { current, die, save } from "./runtime.mjs";
 import { changedBetween, contentTree, gitRoot, viaLink } from "./workspace.mjs";
 import { inScope, realPath } from "./scope.mjs";
-import { cleanArchives, git, removeWorktree } from "./archive.mjs";
+import { cleanArchives, deleteBranch, git, isSymbolic, removeWorktree } from "./archive.mjs";
 import { envToMain, materialize, must } from "./worktree.mjs";
 
 const WORKTREES = path.join(HOME, "worktrees");
@@ -18,8 +18,9 @@ const list = (files) => (files.length > 5 ? `${files.slice(0, 5).join("、")} �
 // 目录名和分支名共用：只留文字、数字、下划线和连字符，分支名里不合法的字符都换掉
 export const nameOf = (label) => label.replace(/[^\p{L}\p{N}_-]+/gu, "_");
 export const branchOf = (runId, label) => `codex-flow/${runId}/${nameOf(label)}`;
-// 成果提交的说明：重做同一任务前据此认出分支是不是还停在上次的成果上
 const tipMessage = (runId, label) => `codex-flow ${runId} ${label}`;
+// 汇总里的命令整行复制就能运行：路径和分支名按 shell 规则加引号
+const sh = (arg) => (/^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", `'\\''`)}'`);
 
 // 运行中的隔离任务：被停止时（onStop 在打印汇总前调用 closeActive）和进程退出时补存成果、收尾，再存一次状态
 const active = new Set();
@@ -40,6 +41,7 @@ process.on("exit", closeActive);
 export function isolationBlocker(cwd) {
   const root = gitRoot(cwd);
   if (!root) return `${cwd} 不在 git 仓库里：隔离只支持 git`;
+  if (git(root, ["rev-parse", "--verify", "-q", "HEAD"]).status !== 0) return `仓库 ${root} 还没有提交，隔离要从一个提交建 worktree`;
   const staged = git(root, ["ls-files", "-s", "-z"]).stdout.split("\0");
   const modules = staged.filter((e) => e.startsWith("160000 ")).map((e) => e.slice(e.indexOf("\t") + 1));
   const live = modules.filter((rel) => fs.existsSync(path.join(root, rel, ".git")));
@@ -86,14 +88,17 @@ function prepare(dir, task, cwd, root) {
   return { task, runId, root, cwd, wtPath: path.join(WORKTREES, runId, nameOf(task.label)), links: [], archived: false };
 }
 
-// 同一任务重做前：上次留下的分支还停在上次的成果上就删掉；之后有人在上面提交过就不动它，报错让人先处理
+// 同一任务重做前：同名分支只在仍停在本运行记下的旧成果提交（state.leftovers）上时删掉；
+// 之后有人改过、是符号引用或不是本运行留下的，都不动它，报错让人先处理
 function dropOldBranch(iso, name) {
   const ref = `refs/heads/${name}`;
+  if (isSymbolic(iso.root, ref)) throw new Error(`分支 ${name} 是指向别处的符号引用，先删掉它再重跑`);
   const tip = git(iso.root, ["rev-parse", "--verify", "-q", ref]).stdout.trim();
   if (!tip) return;
-  const message = git(iso.root, ["log", "-1", "--format=%s", tip]).stdout.trim();
-  if (message !== tipMessage(iso.runId, iso.task.label)) throw new Error(`分支 ${name} 在上次的成果之后有新提交，先合并或删掉它再重跑`);
-  must(git(iso.root, ["update-ref", "-d", ref, tip]), `删掉上次的分支 ${name}`);
+  const left = current?.state.leftovers?.branches ?? [];
+  const mine = left.find((b) => b.name === name && b.repo === iso.root && b.tip === tip);
+  if (!mine || deleteBranch(iso.root, name, tip) !== "deleted") throw new Error(`分支 ${name} 已存在，且不是上次留下、之后没改过的成果，先合并或删掉它再重跑`);
+  left.splice(left.indexOf(mine), 1);
 }
 
 // 任务开始：主工作区此刻的内容（含未提交和未跟踪的文件）B 包成基准提交（与 HEAD 相同时直接用 HEAD），建 worktree 写出 B
@@ -119,7 +124,7 @@ export function openWorktree(dir, task, cwd) {
 
 // 续跑只重跑验收：按上次存下的成果（没有改动时按基准）重建 worktree 在里面验收。成果提交已不在就报错
 export function reopenWorktree(dir, task, cwd) {
-  const b = task.branch ?? {};
+  const b = task.branch ?? legacyBranch(dir, task);
   const tree = (commit) => (b.repo && commit ? git(b.repo, ["rev-parse", "--verify", "-q", `${commit}^{tree}`]).stdout.trim() : "");
   const iso = prepare(dir, task, cwd, b.repo);
   // 有改动却没有成果提交（被 clean 删了）时不能退回按基准验收
@@ -128,7 +133,20 @@ export function reopenWorktree(dir, task, cwd) {
   removeWorktree(iso.root, iso.wtPath, task.worktree?.links);
   enter(iso, iso.end);
   iso.changed = changedFiles(iso);
+  if (task.branch && !task.branch.files?.length) task.branch.files = iso.changed.map((rel) => shown(iso, rel)).sort();
   return track(iso);
+}
+
+// V0.3 的记录：没合回的成果在私有引用 refs/codex-flow/<runId>/<任务名>/{base,result} 里。换成分支，之后照新做法处理
+function legacyBranch(dir, task) {
+  const m = task.merge;
+  if (!m?.result || m.state === "applied") return {};
+  const name = branchOf(path.basename(dir), task.label);
+  const ok = git(m.repo, ["update-ref", "--no-deref", `refs/heads/${name}`, m.result.id, ""]).status === 0;
+  if (!ok) return {};
+  task.branch = { repo: m.repo, name, base: m.base.id, tip: m.result.id, files: m.files ?? [] };
+  delete task.merge;
+  return task.branch;
 }
 
 function changedFiles(iso) {
@@ -164,7 +182,8 @@ function archiveResult(task, iso) {
   const b = task.branch;
   if (iso.changed.length) {
     const tip = commitTree(iso.root, iso.end, [b.base], tipMessage(iso.runId, task.label));
-    must(git(iso.root, ["update-ref", `refs/heads/${b.name}`, tip, ""]), `建分支 ${b.name}`);
+    // 不解引用、要求原来不存在：同名的符号引用或已有分支都会让这里失败，不会写到别的分支上
+    must(git(iso.root, ["update-ref", "--no-deref", `refs/heads/${b.name}`, tip, ""]), `建分支 ${b.name}`);
     Object.assign(b, { tip, files: iso.changed.map((rel) => shown(iso, rel)).sort() });
   }
   const anomalies = iso.links.filter((rel) => {
@@ -220,12 +239,13 @@ export function isolationLines(task) {
   if (task.envToMain?.length) lines.push(`⚠ 环境里的本地包指向主工作区，验收可能测的不是隔离里的代码：${list(task.envToMain)}`);
   if (["pending", "running"].includes(task.status)) return lines;
   const b = task.branch ?? {};
-  if (b.archiveError) lines.push(`⚠ 存不下隔离任务的成果：${b.archiveError}`);
+  // 验收前就存不下的，原因已在通用的失败行里
+  if (b.archiveError && task.failureKind !== "archive") lines.push(`⚠ 存不下隔离任务的成果：${b.archiveError}`);
   if (b.tip) {
-    const base = b.base.slice(0, 12);
+    const [repo, base, ref] = [sh(b.repo), b.base.slice(0, 12), sh(`refs/heads/${b.name}`)];
     lines.push(`成果在分支 ${b.name}（${b.files.length} 个文件），没有合进主工作区`,
-      `查看：git -C ${b.repo} diff ${base} ${b.name}`,
-      `合进主工作区：git -C ${b.repo} diff --binary ${base} ${b.name} | git -C ${b.repo} apply`);
+      `查看：git -C ${repo} diff ${base} ${ref} --`,
+      `合进主工作区：git -C ${repo} diff --binary ${base} ${ref} -- | git -C ${repo} apply`);
   } else if (b.repo && !b.archiveError && task.status !== "failed") lines.push("没有改动");
   if (b.anomalies?.length) lines.push(`⚠ 环境目录链接被任务换掉：${list(b.anomalies)}`);
   if (task.worktree) lines.push(`worktree 保留在 ${task.worktree.path}`);
@@ -249,6 +269,7 @@ export function cmdClean({ positionals }) {
     if (t.branch && !kept.includes(t.branch.name)) delete t.branch.tip;
     delete t.merge;
   }
+  if (state.leftovers) state.leftovers.branches = state.leftovers.branches.filter((b) => kept.includes(b.name));
   writeJson(statePath(dir), state);
   const note = kept.length ? `；这些分支之后有新提交，没删：${kept.join("、")}` : "";
   process.stdout.write(`[codex-flow] 已清理 ${runId}：删除 ${branches} 个分支、${worktrees} 个 worktree${note}\n`);

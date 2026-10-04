@@ -50,8 +50,9 @@ test('有改动：成果存成分支、不合回主工作区；未提交和未�
   assert.equal(exists(WT, state.runId), false, 'worktree 目录删掉');
   assert.equal(worktrees(repo).match(/^worktree /gm).length, 1);
   const base = t.branch.base.slice(0, 12);
-  const apply = `git -C ${repo} diff --binary ${base} ${name} | git -C ${repo} apply`;
-  assert.ok(r.stdout.includes(`    成果在分支 ${name}（1 个文件），没有合进主工作区\n    查看：git -C ${repo} diff ${base} ${name}\n    合进主工作区：${apply}\n`), r.stdout);
+  const ref = `'refs/heads/${name}'`;
+  const apply = `git -C ${repo} diff --binary ${base} ${ref} -- | git -C ${repo} apply`;
+  assert.ok(r.stdout.includes(`    成果在分支 ${name}（1 个文件），没有合进主工作区\n    查看：git -C ${repo} diff ${base} ${ref} --\n    合进主工作区：${apply}\n`), r.stdout);
   assert.match(read(dir, 'logs', '甲.prompt.txt'), /结束后执行器把改动存成一个分支，不合回主工作区/);
   assert.equal(spawnSync('sh', ['-c', apply]).status, 0);
   assert.match(read(repo, 'a/x.md'), /^写入/);
@@ -209,7 +210,7 @@ test('重做同一任务：上次的分支还停在成果上就换成新的；�
   const r = runPlan(make('PATCH:d.md'), ['--resume', state.runId]);
   assert.equal(r.status, 1);
   const t = taskOf(lastRun().state, '甲');
-  assert.match(t.error, /分支 .* 在上次的成果之后有新提交，先合并或删掉它再重跑/);
+  assert.match(t.error, /分支 .* 已存在，且不是上次留下、之后没改过的成果，先合并或删掉它再重跑/);
   assert.equal(git('rev-parse', name).trim(), moved, '分支不动');
 });
 

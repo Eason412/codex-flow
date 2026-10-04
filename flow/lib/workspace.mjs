@@ -1,5 +1,5 @@
 // 工作区内容快照：把 git 工作区当前内容（含未提交、未跟踪但未被忽略的文件）写成一个 tree，
-// 续跑判断结果是否过期、隔离任务同步和合回都比较这个 tree。写入的对象没有引用，会被 git gc 回收
+// 续跑判断结果是否过期、隔离任务的开始和结束快照都用这个 tree。写入的对象没有引用，会被 git gc 回收
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -30,7 +30,7 @@ export function viaLink(root, rel) {
 // 用临时 index 记下工作区内容，不碰仓库自己的 index。先复制原 index，沿用其中的文件状态缓存，未改的文件不用重新读。
 // 副本保留原 index 的修改时间：git 按 index 的时间判断哪些文件可能和 index 同一时刻写过、要重新读内容，复制不改变这个口径。
 // keep 是基准快照：基准里有、磁盘上仍在、只因被忽略而没进快照的文件强制加回（主工作区强制暂存的被忽略文件，
-// 同步进 worktree 后 index 重置为 HEAD，不加回就会被当成删除合回去）
+// 同步进 worktree 后 index 重置为 HEAD，不加回就会被当成任务删掉了它）
 export function contentTree(root, keep = null) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-flow-index-"));
   const index = path.join(tmp, "index");

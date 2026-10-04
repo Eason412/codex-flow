@@ -1,7 +1,8 @@
 // run.sh 的单发登记、结束报告与最终回复排版；登记失败时仍按原参数补登。
 import fs from "node:fs";
 import path from "node:path";
-import { briefOf, checkModelEffort, nowIso, pruneOldRuns, readJson, serviceTierOf, statePath, writeJson } from "./state.mjs";
+import { briefOf, checkModelEffort, HOME, nowIso, pruneOldRuns, readJson, serviceTierOf, statePath, writeJson } from "./state.mjs";
+import { cleanArchives } from "./archive.mjs";
 import { ALERT_AFTER, die, SESSION } from "./runtime.mjs";
 import { jsonlObjects, singleContext } from "./rollout.mjs";
 import { settleSingleTokens, watchSingle } from "./tokens.mjs";
@@ -216,7 +217,8 @@ export function cmdSingleEnd({ flags }) {
     fail(error);
   }
   try {
-    pruneOldRuns();
+    // 过期的 flow 记录里有隔离成果的，先删仍停在成果上的分支和残留 worktree
+    pruneOldRuns(7, (state) => cleanArchives(state, path.join(HOME, "worktrees")));
   } catch {
     // 和多任务 flow 一样，清理失败不影响结果。
   }

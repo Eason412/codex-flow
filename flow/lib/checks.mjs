@@ -94,7 +94,7 @@ async function runChecks(dir, task, cwd, stopFile) {
 }
 
 // 运行验收命令，只返回结果、不改任务状态：null 通过（没有验收命令也算），"stop" 被停止，其余为失败说明。
-// 隔离任务在验收和合回期间保持运行中，用它；其余用 finishChecks
+// 隔离任务在 worktree 里验收、由调用方结算，用它；其余用 finishChecks
 export async function checkTask(dir, task, cwd, stopFile) {
   if (!task.checks?.length) return null;
   if (stopping) return "stop";
@@ -146,7 +146,8 @@ export async function recheckTask(dir, task, cwd) {
   save();
   let iso = null;
   try {
-    if (task.isolation === "worktree") {
+    // V0.3 已合回主工作区的成果：照旧在主工作区验收
+    if (task.isolation === "worktree" && task.merge?.state !== "applied") {
       iso = reopenWorktree(dir, task, cwd);
       noteScope(task, iso);
     }

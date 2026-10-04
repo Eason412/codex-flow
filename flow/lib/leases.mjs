@@ -76,12 +76,12 @@ export function overlapNotes(tasks, deps) {
       const names = `「${a.t.label}」「${b.t.label}」`;
       const both = overlapOf(a.lease, b.lease);
       if (both.length) {
-        notes.push(`${names}写入范围重叠（${both.map((p) => path.relative(realPath(a.t.cwd), p) || ".").join("、")}），将依次运行；要同时运行就给它们加 isolation`);
+        notes.push(`${names}写入范围重叠（${both.map((p) => path.relative(realPath(a.t.cwd), p) || ".").join("、")}），将依次运行；确实要同时改就给它们加 isolation（改动各存成分支，之后由 Claude 合并）`);
         continue;
       }
       const [known, unknown] = a.lease && b.t.writes === undefined ? [a, b] : b.lease && a.t.writes === undefined ? [b, a] : [];
       if (known && overlapOf(known.lease, unknown.root).length) {
-        notes.push(`「${unknown.t.label}」没写 writes，可能和「${known.t.label}」改到同一处；写明 writes（只读写 []），或加 isolation`);
+        notes.push(`「${unknown.t.label}」没写 writes，可能和「${known.t.label}」改到同一处；写明 writes（只读写 []），或加 isolation（改动存成分支）`);
       }
     }
   }

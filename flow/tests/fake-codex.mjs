@@ -11,6 +11,8 @@ if (args[0] === 'app-server') {
   // error 和 silent 时进程继续活着并把 pid 写到 $CODEX_HOME/fake-app-pid；FAKE_IGNORE_EOF=1 用定时器保活、不随 stdin 结束而退出，FAKE_IGNORE_TERM=1 再忽略 SIGTERM（只有 SIGKILL 杀得掉）
   const initMode = process.env.FAKE_INIT && process.cwd().includes(process.env.FAKE_INIT_ONLY ?? '') ? process.env.FAKE_INIT : '';
   if (process.env.FAKE_IGNORE_EOF) setInterval(() => {}, 1000);
+  // FAKE_RECORD_PIDS=1：每个 app-server 一起来就把 pid 追加到 $CODEX_HOME/fake-app-pids
+  if (process.env.FAKE_RECORD_PIDS) fs.appendFileSync(path.join(process.env.CODEX_HOME, 'fake-app-pids'), `${process.pid}\n`);
   if (process.env.FAKE_IGNORE_TERM) process.on('SIGTERM', () => {});
   readline.createInterface({ input: process.stdin }).on('line', (line) => {
     const request = JSON.parse(line);
@@ -21,8 +23,12 @@ if (args[0] === 'app-server') {
       if (initMode === 'error') send({ id: request.id, error: { code: -32600, message: '假初始化被拒' } });
       return;
     }
-    // 归档请求记到 $CODEX_HOME/fake-archived，测试据此核对
-    if (request.method === 'thread/archive') fs.appendFileSync(path.join(process.env.CODEX_HOME, 'fake-archived'), `${request.params.threadId}\n`);
+    // 归档请求：FAKE_ARCHIVE=fail 回错误、hang 不回应；成功的记到 $CODEX_HOME/fake-archived，测试据此核对
+    if (request.method === 'thread/archive') {
+      if (process.env.FAKE_ARCHIVE === 'hang') return;
+      if (process.env.FAKE_ARCHIVE === 'fail') return send({ id: request.id, error: { code: -32600, message: '假归档失败' } });
+      fs.appendFileSync(path.join(process.env.CODEX_HOME, 'fake-archived'), `${request.params.threadId}\n`);
+    }
     let result = {};
     // 插话里带 REJECT 时像 turn 已结束那样回错误
     if (request.method === 'turn/steer' && JSON.stringify(request.params).includes('REJECT')) return send({ id: request.id, error: { code: -32600, message: '假插话被拒' } });

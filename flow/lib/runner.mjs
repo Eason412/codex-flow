@@ -44,7 +44,7 @@ export async function onStop(signal) {
   // 到时还没退出的直接强制结束，父进程退出后就没人再管它们了
   for (const server of servers) server.proc?.kill("SIGKILL");
   // 被停掉的任务的 Codex 对话没来得及归档，另起一个 app-server 补上，最多等 4 秒
-  await Promise.race([archiveLeftovers(state), new Promise((r) => setTimeout(r, 4000))]);
+  await archiveLeftovers(state, 3000);
   save();
   // Codex 都停了再收尾隔离任务（存成果、删目录），汇总写的是收尾后的实际去留
   closeActive();
@@ -128,7 +128,7 @@ function populateFlowTasks(dir, state, previous, planTasks, deps, rerun, notes) 
       const t = planTasks.get(label);
       const old = previous?.tasks?.find((o) => o.label === label);
       reusable.set(label, !!(old && (old.status === "completed" || old.checkFailed) && old.hash === promptHash(t) && old.result && fs.existsSync(path.join(dir, old.result))
-        && (old.cwd ?? previous.cwd) === (t.cwd ?? cwd) && (!old.needs || sameList(old.needs, deps.get(label))))
+        && (old.cwd ?? previous.cwd) === (t.cwd ?? cwd) && (!old.needs || sameList(old.needs, deps.get(label))) && (old.isolation ?? null) === (t.isolation ?? null))
         && !rerun.has(label) && !(readOnly(t) && staleFor(label).length)
         && deps.get(label).every(canReuse));
     }
@@ -164,9 +164,23 @@ function populateFlowTasks(dir, state, previous, planTasks, deps, rerun, notes) 
       : { label, phase: t.phase, model: t.model, effort: t.effort, ...tierOf(t.model), brief: t.brief || briefOf(literal(t.prompt)), hash: promptHash(t), status: "pending",
           needs: deps.get(label), ...contract, ...(t.schema ? { schema: t.schema } : {}), ...(t.cwd && t.cwd !== cwd ? { cwd: t.cwd } : {}), ...staleRerun });
   }
+  carryLeftovers(state, previous);
   if (changes?.unknown.length && state.tasks.some((t) => t.reused)) {
     notes.push(`无法判断复用的结果是否过期（不在 git 里，或上次运行没有记下工作区快照）：${changes.unknown.join("、")}`);
   }
+}
+
+// 续跑时没被复用的旧任务（重跑、改了隔离方式或从计划里删掉），它的成果分支和没归档成的对话不能跟着记录一起丢：
+// 记进 state.leftovers，clean、过期清理和补归档照样管，重做同一任务时据此认出可以换掉的旧分支
+function carryLeftovers(state, previous) {
+  if (!previous) return;
+  const left = { branches: [...(previous.leftovers?.branches ?? [])], threads: [...(previous.leftovers?.threads ?? [])] };
+  for (const old of previous.tasks ?? []) {
+    if (state.tasks.some((t) => t.label === old.label && t.reused)) continue;
+    if (old.branch?.tip) left.branches.push({ repo: old.branch.repo, name: old.branch.name, tip: old.branch.tip });
+    if (old.threadId && !old.threadArchived) left.threads.push(old.threadId);
+  }
+  if (left.branches.length || left.threads.length) state.leftovers = left;
 }
 
 // 拼出发给 Codex 的任务说明，并按指令、资料、上游结果、约束、schema 计量
@@ -222,7 +236,7 @@ function scheduleTasks(dir, state, planTasks, deps) {
           }
           const t = planTasks.get(task.label);
           const taskCwd = t.cwd ?? cwd;
-          // 写入范围和运行中的任务（或排队中的合回）重叠就先等着，前者结束时会再走到这里
+          // 写入范围和运行中的任务重叠就先等着，前者结束时会再走到这里
           const isolated = !task.recheck && t.isolation === "worktree";
           const lease = task.recheck || isolated ? null : leaseOf(t.writes, taskCwd);
           const blockers = leases.blockers(lease, task.label);
@@ -273,7 +287,7 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   await scheduleTasks(dir, state, planTasks, deps);
   // 停止中关 app-server 会让启动中的任务提前结束，由 onStop 收尾和退出
   if (stopping) return new Promise(() => {});
-  await archiveLeftovers(state);
+  await archiveLeftovers(state, 15000);
   state.status = overallStatus(state.tasks);
   state.endedAt = nowIso();
   try {

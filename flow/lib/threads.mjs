@@ -5,32 +5,41 @@ import { AppServer } from "./appserver.mjs";
 const ARCHIVE_TIMEOUT_MS = 5000;
 const archiving = () => process.env.CODEX_FLOW_ARCHIVE_THREADS !== "0";
 
-// 任务结束、关 app-server 之前，由写入它的那个 app-server 归档；失败只影响桌面端列表，结束时再补一次
-export async function archiveThread(server, task) {
-  if (!archiving() || !task.threadId || task.threadArchived) return;
+// 归档一条对话，成功返回 true；失败只影响桌面端列表
+async function archiveOne(server, threadId) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("归档超时")), ARCHIVE_TIMEOUT_MS);
+  });
   try {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("归档超时")), ARCHIVE_TIMEOUT_MS);
-    });
-    await Promise.race([server.request("thread/archive", { threadId: task.threadId }), timeout]).finally(() => clearTimeout(timer));
-    task.threadArchived = true;
+    await Promise.race([server.request("thread/archive", { threadId }), timeout]);
+    return true;
   } catch {
-    // 留给 archiveLeftovers
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-// 补归档：被停止或归档失败留下的对话。写入它们的 app-server 已经关掉，另起一个新的来归档
-export async function archiveLeftovers(state) {
-  const left = state.tasks.filter((t) => t.threadId && !t.threadArchived);
-  if (!archiving() || !left.length) return;
+// 任务结束、关 app-server 之前，由写入它的那个 app-server 归档；没成功的留给 archiveLeftovers
+export async function archiveThread(server, task) {
+  if (archiving() && task.threadId && !task.threadArchived && (await archiveOne(server, task.threadId))) task.threadArchived = true;
+}
+
+// 补归档：被停止或归档失败留下的对话，加上续跑时被换下来的旧任务没归档成的对话（state.leftovers.threads）。
+// 写入它们的 app-server 已经关掉，另起一个来归档；最多等 timeoutMs，到时关掉它（不理 SIGTERM 的强制结束）再返回
+export async function archiveLeftovers(state, timeoutMs) {
+  const tasks = state.tasks.filter((t) => t.threadId && !t.threadArchived);
+  const loose = state.leftovers?.threads ?? [];
+  if (!archiving() || (!tasks.length && !loose.length)) return;
   let server = null;
-  try {
-    server = await AppServer.start({ cwd: state.cwd });
-    for (const task of left) await archiveThread(server, task);
-  } catch {
-    // 起不来就算了，对话只是留在桌面端列表里
-  } finally {
-    await server?.close();
-  }
+  const work = (async () => {
+    await AppServer.start({ cwd: state.cwd, onSpawn: (s) => { server = s; } });
+    for (const task of tasks) await archiveThread(server, task);
+    for (const id of [...loose]) if (await archiveOne(server, id)) loose.splice(loose.indexOf(id), 1);
+  })().catch(() => {});
+  let timer;
+  await Promise.race([work, new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); })]);
+  clearTimeout(timer);
+  await server?.close();
 }

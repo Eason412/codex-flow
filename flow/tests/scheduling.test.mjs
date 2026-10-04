@@ -16,12 +16,12 @@ test('写入范围重叠的任务依次运行并提示；不重叠的同时运�
     { label: '乙', ...sol, writes: ['a/y.md'], prompt: 'SLOW PATCH:a/y.md' },
     { label: '丙', ...sol, writes: ['c'], prompt: 'SLOW PATCH:c/z.md' },
     { label: '丁', ...sol, writes: ['a'], after: ['乙'], prompt: '丁' },
-  ] }] });
+  ] }] }, [], fakePath({ FAKE_SLOW_MS: '4000' }), 30000);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const { state } = lastRun();
   assert.ok(at(state, '乙', 'startedAt') >= at(state, '甲', 'endedAt'), '乙 等 甲 结束');
   assert.ok(at(state, '丙', 'startedAt') < at(state, '甲', 'endedAt'), '丙 和 甲 同时运行');
-  assert.match(result.stderr, /「甲」「乙」写入范围重叠（a\/y\.md），将依次运行；要同时运行就给它们加 isolation/);
+  assert.match(result.stderr, /「甲」「乙」写入范围重叠（a\/y\.md），将依次运行；确实要同时改就给它们加 isolation（改动各存成分支，之后由 Claude 合并）/);
   assert.doesNotMatch(result.stderr, /「乙」「丁」/);
   assert.ok(state.tasks.every((t) => t.status === 'completed' && t.waiting === undefined));
 });
@@ -32,11 +32,11 @@ test('没写 writes 的任务照常并行，和有写入范围的任务在同一
     { label: '写', ...sol, writes: ['a'], prompt: 'SLOW' },
     { label: '散', ...sol, prompt: '散' },
     { label: '读', ...sol, writes: [], prompt: '读' },
-  ] }] });
+  ] }] }, [], fakePath({ FAKE_SLOW_MS: '4000' }), 30000);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const { state } = lastRun();
   assert.ok(at(state, '散', 'startedAt') < at(state, '写', 'endedAt'));
-  assert.match(result.stderr, /「散」没写 writes，可能和「写」改到同一处；写明 writes（只读写 \[\]），或加 isolation/);
+  assert.match(result.stderr, /「散」没写 writes，可能和「写」改到同一处；写明 writes（只读写 \[\]），或加 isolation（改动存成分支）/);
   assert.doesNotMatch(result.stderr, /「读」/);
 });
 

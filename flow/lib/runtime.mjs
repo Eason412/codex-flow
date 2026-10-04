@@ -19,7 +19,7 @@ export const checkProcs = new Set();
 export const touchedBy = new Map(); // 任务名 → Codex 改文件记录里的路径，判断范围外变动来自哪个任务
 export const checkWindows = []; // 验收命令运行的时段，验收产物可能被同时段的其他任务看成范围外变动
 export let current = null; // { dir, state }
-// 整个 flow 收到停止信号后为 true：不再合回、不再重新验收，已记为停止的任务不被之后结束的验收改成失败
+// 整个 flow 收到停止信号后为 true：不再启动验收命令，已记为停止的任务不被之后结束的验收改成失败或完成
 export let stopping = false;
 export function markStopping() {
   stopping = true;

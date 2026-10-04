@@ -57,6 +57,20 @@ export function dropRefs(repo, prefix) {
   return refs.length;
 }
 
+// 分支是不是符号引用（指向另一个分支）：这种分支不碰，免得删或写到它指向的分支上
+export const isSymbolic = (repo, ref) => git(repo, ["symbolic-ref", "-q", ref]).status === 0;
+
+// 删除仍停在成果提交 tip 上的分支：不解引用、带旧值比较，一步完成。返回 "deleted"、"kept"（之后有新提交或是符号引用）或 "gone"
+export function deleteBranch(repo, name, tip) {
+  const ref = `refs/heads/${name}`;
+  if (!fs.existsSync(repo)) return "gone";
+  if (isSymbolic(repo, ref)) return "kept";
+  const now = git(repo, ["rev-parse", "--verify", "-q", ref]).stdout.trim();
+  if (!now) return "gone";
+  if (now !== tip) return "kept";
+  return git(repo, ["update-ref", "--no-deref", "-d", ref, tip]).status === 0 ? "deleted" : "kept";
+}
+
 // 删掉一次运行的成果分支（只删仍停在成果提交上的，之后有新提交的留下）、V0.3 的私有引用和残留 worktree（只删带本运行标记的），
 // 返回 { branches, kept, worktrees }
 export function cleanArchives(state, worktreesRoot) {
@@ -64,16 +78,12 @@ export function cleanArchives(state, worktreesRoot) {
   const tasks = state.tasks ?? [];
   let branches = 0;
   const kept = [];
-  for (const t of tasks) {
-    const b = t.branch;
-    if (!b?.tip || !fs.existsSync(b.repo)) continue;
-    const ref = `refs/heads/${b.name}`;
-    const now = git(b.repo, ["rev-parse", "--verify", "-q", ref]).stdout.trim();
-    if (now === b.tip) {
-      // 带旧值删除：比较和删除一步完成，期间有人提交就删不掉
-      if (git(b.repo, ["update-ref", "-d", ref, b.tip]).status === 0) branches++;
-      else kept.push(b.name);
-    } else if (now) kept.push(b.name);
+  // 当前任务的成果，加上续跑时被换下来的旧成果（state.leftovers）
+  const owned = [...tasks.map((t) => t.branch).filter((b) => b?.tip), ...(state.leftovers?.branches ?? [])];
+  for (const b of owned) {
+    const outcome = deleteBranch(b.repo, b.name, b.tip);
+    if (outcome === "deleted") branches++;
+    else if (outcome === "kept") kept.push(b.name);
   }
   for (const repo of new Set(tasks.flatMap((t) => [t.merge?.repo, t.worktree?.repo]).filter(Boolean))) {
     if (fs.existsSync(repo)) dropRefs(repo, `refs/codex-flow/${runId}`);
