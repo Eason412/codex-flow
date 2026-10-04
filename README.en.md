@@ -9,7 +9,7 @@
 - **Codex CLI**: OpenAI's command-line coding agent, which runs the tasks Claude dispatches.
 - **Mod**: a Claude Code plugin made of hook functions that can draw panels and register commands. The task panel in this project is a mod.
 
-Current version: [V0.3.0](https://github.com/Eason412/codex-flow/releases/tag/V0.3.0) ([all versions and release notes](https://github.com/Eason412/codex-flow/releases)). The app-server client follows the protocol usage of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) (Apache-2.0).
+Current version: [V0.4.0](https://github.com/Eason412/codex-flow/releases/tag/V0.4.0) ([all versions and release notes](https://github.com/Eason412/codex-flow/releases)). The app-server client follows the protocol usage of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) (Apache-2.0).
 
 > ⚠️ **Requires macOS or Linux with a signed-in Codex CLI, Node.js, and a Claude Code build with mod support.** Codex runs with full access (no sandbox, no approvals) and edits files and runs commands directly.
 
@@ -41,15 +41,15 @@ codex-flow follows Claude Code's Workflow: Claude is the orchestrator and decide
 
 - **Summary**: Each task's full reply goes into a result file in the run directory; the summary gives Claude one status line per task, a conclusion of up to three lines, and the file path, to read only when needed.
 - **References instead of content**: When a downstream task needs an upstream result, `{{path:task}}` passes only the path of the result file for Codex to read itself, instead of pasting the full text into the brief; when injected upstream results exceed 8,000 characters, the summary suggests switching to it.
-- **One line per warning**: Failure reasons, out-of-scope writes, the same file changed by another task at the same time, stale reused results, and the merge outcome of isolated tasks each take one line, and appear only when they apply.
+- **One line per warning**: Failure reasons, out-of-scope writes, the same file changed by another task at the same time, stale reused results, and the result branch of isolated tasks each take one line, and appear only when they apply.
 
-### Parallel writes: queue first, isolate only when needed
+### Parallel writes: like Claude's Workflow, split by file first and isolate only when needed
 
-- **Basis**: Claude Code's agent teams documentation asks parallel agents to own different files and lists same-file edits as unsuited to parallel work; a study of 33,596 agent pull requests found that worktrees only postpone conflicts to merge time, and that conflicts drop when work is split by file, merged one at a time, and checked early.
-- **Default: queue and detect**. A task with `writes` waits while its scope overlaps a running task; when two concurrently running tasks actually change the same file, both are flagged and the one that finished first is checked again in the main workspace. Tasks without `writes` still run in parallel, with a note at start suggesting a scope.
-- **Optional: `isolation: "worktree"`**. Like `isolation: 'worktree'` in Claude's Workflow, use it only when several tasks really must change the same files at the same time; each isolated task takes the disk space of one more checkout, which depends on the repository (about 1 second and 240 MB for an 8.5k-file repository), and at most 4 exist at once (`CODEX_FLOW_MAX_WORKTREES`). Set at the plan level it becomes the default, and a task opts out with `false`.
-- **Same as Claude**: The worktree is locked while the task runs, removed when nothing changed, and only worktrees created by codex-flow are ever cleaned up.
-- **Different from Claude**: Claude keeps a worktree with changes for the main agent to merge; in codex-flow the next phase often uses the previous phase's changes directly, so the result merges back into the main workspace after its checks pass. The merge is all or nothing: if the task changed files outside its scope, failed its checks, hits a three-way merge conflict, or is stopped before merging, no file in the main workspace is touched. If the main workspace changed in the meantime, the checks run again there after the merge; if they fail then, the changes are already in the main workspace, are not rolled back, and the task is marked failed. A result that was not merged is kept as a private git ref and the worktree directory is removed right away; the summary prints commands to view and retrieve it. If a merge fails halfway through writing, the worktree and refs are kept for manual review. Ignored files are not snapshotted, so output written into ignored directories such as `build/` is not merged back.
+- **Basis**: Claude Code's agent teams documentation asks parallel agents to own different files and lists same-file edits as unsuited to parallel work; a study of 33,596 agent pull requests found that worktrees only postpone conflicts to merge time, and that conflicts drop when work is split by file, merged one at a time, and checked early. Claude's Workflow works the same way: the orchestrator splits work by file, runs dependent tasks in order, and uses a worktree only when several tasks must change the same files at the same time.
+- **Queue**: A task with `writes` waits while its scope overlaps a running task, as if `after` had been added between them; no result changes. Tasks without `writes` could write anywhere, so they run in parallel as usual, with a note at start suggesting a scope.
+- **Collision notes**: When `writes` is missing or wrong, two concurrently running tasks may change the same file. Once Codex's own file-change records show it, each task gets a line in the summary and Claude decides whether to rerun one of them (the one that finished first ran its checks before the other's changes). It does not prevent overwrites, and files written by shell commands leave no record.
+- **Optional: `isolation: "worktree"`**, as in Claude's Workflow: the task runs and is checked in its own worktree; if it changed anything, the result is kept on branch `codex-flow/<runId>/<task>` and not merged into the main workspace. The summary prints commands to view it and to apply it to the main workspace, and Claude merges after reviewing it; nothing is kept when nothing changed. Use it sparingly: each isolated task takes the disk space of one more checkout, which depends on the repository (about 1 second and 240 MB for an 8.5k-file repository), and at most 4 exist at once (`CODEX_FLOW_MAX_WORKTREES`). Set at the plan level it becomes the default, and a task opts out with `false`.
+- **Limits of isolation**: An isolated task's changes are not in the main workspace, so tasks after it cannot see them, and a note at start says so; for hand-offs, do not isolate, or run twice and merge in between. Ignored files are not part of the result, so output written into ignored directories such as `build/` is not on the branch. One difference from Claude: the worktree directory is removed once the branch is saved, to save disk; `keepWorktree: true` keeps it.
 
 ## ⚙️ How it works
 
@@ -75,7 +75,8 @@ Claude Code main conversation
 | `models.json` | Allowed models and efforts, and the models that use Fast by default |
 
 - **Display apart from execution**: The mod only displays and reminds; tasks keep running when it is not loaded.
-- **Run records**: Stored in `$HOME/.claude/codex-flow` by default (override with `CODEX_FLOW_HOME`) and kept for 7 days, or 30 days when they hold unmerged isolated results.
+- **Run records**: Each run leaves its plan, state, every task's full reply, logs and summary in `$HOME/.claude/codex-flow/runs/<runId>/` (override with `CODEX_FLOW_HOME`); the panel, `status`, resume and `stats` read them. They are kept for 7 days, or 30 days when they hold isolated result branches. There is no timer: after that, the next time codex-flow finishes a flow or a single task it deletes them, first removing result branches that still point at the result and leftover worktrees; if codex-flow never runs again, they stay. Every summary states next to the run directory until when it is kept, and `clean <runId>` removes result branches and worktrees right away.
+- **Codex threads**: Each task's Codex thread is archived when the task ends. The full transcript stays in `~/.codex/archived_sessions` but no longer appears under Recent or Projects in the Codex desktop app, just as Claude's Workflow subagent transcripts stay out of `/resume`. codex-flow never deletes Codex's own session files.
 - **Paths**: The code hardcodes no paths. The repository can live in any directory, scripts find their files relative to their own location, and relative paths in a plan resolve against the plan file and its `cwd`.
 
 ## 🖥️ Task panel
@@ -129,6 +130,7 @@ Have an agent read [SETUP.md](SETUP.md) and follow its steps for installation, c
 | Models that use Fast by default | `fast` in `models.json` | Only models listed in `models`; omitted or empty means none |
 | Check-in interval | `CODEX_FLOW_ALERT_AFTER` in the `env` block of `~/.claude/settings.json` | Seconds, default 900 |
 | Run record location | `CODEX_FLOW_HOME` in the `env` block of `~/.claude/settings.json` | Default `~/.claude/codex-flow` |
+| Archive Codex threads | `CODEX_FLOW_ARCHIVE_THREADS` in the `env` block of `~/.claude/settings.json` | Archived by default; `0` turns it off |
 | Concurrent isolated tasks | `CODEX_FLOW_MAX_WORKTREES` in the `env` block of `~/.claude/settings.json` | Default 4; further isolated tasks wait |
 | Status line progress | ccstatusline custom-command | Command `node ~/.claude/skills/codex/flow/statusline.mjs`, with `preserveColors` on |
 
@@ -160,7 +162,7 @@ Have an agent read [SETUP.md](SETUP.md) and follow its steps for installation, c
 | `flow/codex-flow.mjs run <plan.json>` | Run a plan by phases and task dependencies; exits when the flow ends, so start it from background Bash |
 | `flow/codex-flow.mjs run --resume <runId> [--rerun <task>]` | Resume, reusing finished tasks whose results are not stale; `--rerun` forces a task to run again and can repeat |
 | `flow/codex-flow.mjs stats <runId> [--json]` | Each task's brief composition, token usage, reply size, and checks |
-| `flow/codex-flow.mjs clean <runId>` | Remove isolated results kept by that run (private refs and leftover worktrees) |
+| `flow/codex-flow.mjs clean <runId>` | Remove that run's result branches (except ones with newer commits) and leftover worktrees |
 | `flow/codex-flow.mjs status [runId]` | Show this session's runs |
 | `flow/codex-flow.mjs cancel <runId> [task]` | Stop the whole flow or one task |
 | `flow/codex-flow.mjs steer <runId> <task> "<text>"` | Add instructions to a running task |

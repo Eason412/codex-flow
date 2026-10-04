@@ -9,7 +9,7 @@
 - **Codex CLI**：OpenAI 的命令行编程智能体，本项目用它执行 Claude 派出的任务。
 - **mod**：Claude Code 的插件钩子模块，可以在界面上绘制面板、注册命令。本项目的任务面板是一个 mod。
 
-当前版本：[V0.3.0](https://github.com/Eason412/codex-flow/releases/tag/V0.3.0)（[全部版本与更新说明](https://github.com/Eason412/codex-flow/releases)）。app-server 客户端的协议用法参照 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)（Apache-2.0）。
+当前版本：[V0.4.0](https://github.com/Eason412/codex-flow/releases/tag/V0.4.0)（[全部版本与更新说明](https://github.com/Eason412/codex-flow/releases)）。app-server 客户端的协议用法参照 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)（Apache-2.0）。
 
 > ⚠️ **前提：macOS 或 Linux，本机需有已登录的 Codex CLI、Node.js 和支持 mod 的 Claude Code。** Codex 以完全权限运行（无沙箱、不审批），会直接修改文件和执行命令。
 
@@ -41,15 +41,15 @@ codex-flow 仿照 Claude Code 的 Workflow：Claude 是编排者，看过具体�
 
 - **汇总**：每个任务的完整回复写进运行目录的结果文件；汇总只给每个任务一行状态、三行以内的结论和文件路径，Claude 需要细看时再读。
 - **引用代替内容**：下游要用上游结果时，`{{path:任务名}}` 只给结果文件路径，由 Codex 自己读，不把全文塞进任务说明；注入的上游结果超过 8000 字时，汇总会提示改用它。
-- **提醒各占一行**：失败原因、越界写入、和别的任务同时改了同一文件、复用的结果已过期、隔离任务的合回结果，有才写，没有就不出现。
+- **提醒各占一行**：失败原因、越界写入、和别的任务同时改了同一文件、复用的结果已过期、隔离任务的成果分支，有才写，没有就不出现。
 
-### 并行写：先排队，确有必要才隔离
+### 并行写：和 Claude Workflow 一样，先按文件分开，确有必要才隔离
 
-- **依据**：Claude Code 的 agent teams 文档要求并行的 agent 各管不同的文件，并指出同一文件的修改不适合并行；对 33,596 个 agent PR 的研究发现 worktree 只把冲突推迟到合并时，按文件划分、逐个合并、尽早发现才能减少冲突。
-- **默认：排队和检测**。写了 `writes` 的任务，范围和正在运行的任务重叠时自动排队；两个同时运行的任务实际改了同一个文件时两边都标出，并在主工作区重新验收先结束的那个。没写 `writes` 的任务照常并行，开始时提示补上范围。
-- **可选：`isolation: "worktree"`**。和 Claude Workflow 的 `isolation: 'worktree'` 一样，只在确实要让几个任务同时改同一批文件时才用；每个隔离任务多占一份检出的磁盘，随仓库大小变（8.5k 文件的仓库约 1 秒、240MB），同时最多 4 个（`CODEX_FLOW_MAX_WORKTREES`）。写在计划顶层时作为默认，单个任务写 `false` 不隔离。
-- **和 Claude 的相同点**：运行中给 worktree 加锁；没改动就删除；只认自己建的 worktree。
-- **和 Claude 的不同点**：Claude 保留有改动的 worktree，由主 Agent 自己合并；codex-flow 的下一阶段常常直接用上一阶段的改动，所以验收通过后自动合回主工作区。合回是整份的：改了范围外的文件、验收没过、三方合并有冲突或合回前被停止时，主工作区一个文件都不动；合回时主工作区已经变过的，合回后在主工作区再验收一次，这次没过时改动已经在主工作区里、不会自动撤回，任务记为失败。没合回的成果存为私有 git 引用，worktree 目录随即删除，汇总给出查看和取回的命令；合回写到一半出错时保留 worktree 和引用等人工核对。被忽略的文件不进快照，写进 `build/` 这类被忽略目录的产物不会合回。
+- **依据**：Claude Code 的 agent teams 文档要求并行的 agent 各管不同的文件，并指出同一文件的修改不适合并行；对 33,596 个 agent PR 的研究发现 worktree 只把冲突推迟到合并时，按文件划分、逐个合并、尽早发现才能减少冲突。Claude Workflow 也是这个做法：编排者按文件拆分，要接力的任务按顺序跑，确实要同时改同一批文件才用 worktree。
+- **排队**：写了 `writes` 的任务，范围和正在运行的任务重叠时，后开始的等前一个结束再跑，效果等于给它们加了 `after`，不改动任何结果。没写 `writes` 的任务不知道会写哪里，照常并行，开始时提示补上范围。
+- **碰撞提示**：`writes` 没写或写错时，两个同时运行的任务可能改到同一个文件。按 Codex 自己的改文件记录发现后，汇总里两边各写一行，由 Claude 决定要不要重跑哪一个（先结束的那个验收时还没看到对方的改动）。它不阻止覆盖；shell 命令写的文件没有记录，查不到。
+- **可选：`isolation: "worktree"`**，做法同 Claude Workflow 的 `isolation: 'worktree'`：任务在独立 worktree 里运行和验收，有改动就把成果存成分支 `codex-flow/<runId>/<任务名>`，不合回主工作区，汇总给出查看和合进主工作区的命令，由 Claude 看过后自己合；没有改动就什么都不留。少用：每个隔离任务多占一份检出的磁盘，随仓库大小变（8.5k 文件的仓库约 1 秒、240MB），同时最多 4 个（`CODEX_FLOW_MAX_WORKTREES`）；写在计划顶层时作为默认，单个任务写 `false` 不隔离。
+- **隔离的边界**：隔离任务的改动不在主工作区，排在它后面的任务看不到，开始时会提示；要接力就别隔离，或分两次运行、中间先合并。被忽略的文件不进成果，写进 `build/` 这类被忽略目录的产物不在分支上。和 Claude 的一处不同：worktree 目录在存成分支后删掉，省磁盘；写 `keepWorktree: true` 保留。
 
 ## ⚙️ 工作原理
 
@@ -75,7 +75,8 @@ Claude Code 主对话
 | `models.json` | 允许的模型和 effort，默认用 Fast 的模型 |
 
 - **显示与运行分开**：mod 只负责显示和提醒；mod 未加载时，任务照常运行。
-- **运行记录**：默认在 `$HOME/.claude/codex-flow`，可用 `CODEX_FLOW_HOME` 改；保留 7 天，含未合回隔离成果的保留 30 天。
+- **运行记录**：每次运行在 `$HOME/.claude/codex-flow/runs/<runId>/`（可用 `CODEX_FLOW_HOME` 改）留下计划、状态、每个任务的完整回复、日志和汇总，面板、`status`、续跑和 `stats` 都读它。保留 7 天，含隔离成果分支的保留 30 天。没有定时任务：过了保留期后，下一次 codex-flow 跑完一个 flow 或单个任务时删除，含成果分支的先删仍停在成果上的分支和残留 worktree；之后不再运行就一直留着。每次汇总的「运行目录」后面写明保留到哪天，`clean <runId>` 可以立即清掉成果分支和 worktree。
+- **Codex 对话**：每个任务的 Codex 对话在任务结束时归档，全文在 `~/.codex/archived_sessions`，不出现在 Codex 桌面端的「最近」和「项目」里，做法同 Claude Workflow 的子代理记录不进 `/resume`。codex-flow 不删除 Codex 自己的会话文件。
 - **路径**：代码不写死路径。仓库可放在任意目录，脚本按自身位置找文件，计划里的相对路径按计划文件和 `cwd` 解析。
 
 ## 🖥️ 任务面板
@@ -129,6 +130,7 @@ Claude Code 主对话
 | 默认用 Fast 的模型 | `models.json` 的 `fast` | 只能写 `models` 里有的；省略或留空时都不用 Fast |
 | 提醒间隔 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ALERT_AFTER` | 单位为秒，默认 900 |
 | 运行记录位置 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_HOME` | 默认 `~/.claude/codex-flow` |
+| 归档 Codex 对话 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ARCHIVE_THREADS` | 默认归档，写 `0` 不归档 |
 | 同时存在的隔离任务数 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_MAX_WORKTREES` | 默认 4，超出的隔离任务排队 |
 | 状态行进度 | ccstatusline 的 custom-command | 命令 `node ~/.claude/skills/codex/flow/statusline.mjs`，开启 `preserveColors` |
 
@@ -160,7 +162,7 @@ Claude Code 主对话
 | `flow/codex-flow.mjs run <plan.json>` | 按计划和任务依赖运行，flow 结束才退出，放在后台 Bash 中启动 |
 | `flow/codex-flow.mjs run --resume <runId> [--rerun <任务名>]` | 续跑，复用已完成且没过期的任务；`--rerun` 强制重跑，可重复 |
 | `flow/codex-flow.mjs stats <runId> [--json]` | 每个任务的说明组成、token 用量、回报大小和验收 |
-| `flow/codex-flow.mjs clean <runId>` | 删除该运行保留的隔离成果（私有引用和残留 worktree） |
+| `flow/codex-flow.mjs clean <runId>` | 删除该运行的成果分支（之后有新提交的不删）和残留 worktree |
 | `flow/codex-flow.mjs status [runId]` | 查看本会话的运行记录 |
 | `flow/codex-flow.mjs cancel <runId> [任务名]` | 停止整个 flow 或其中一个任务 |
 | `flow/codex-flow.mjs steer <runId> <任务名> "<内容>"` | 向运行中的任务补充指示 |
