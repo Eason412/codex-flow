@@ -7,7 +7,10 @@
 //   codex-flow.mjs status [runId] [--all]               本会话的运行记录
 //   codex-flow.mjs cancel <runId> [任务名]              停整个 flow 或其中一个任务
 //   codex-flow.mjs steer <runId> <任务名> "<补充指示>"   给运行中的任务插话
-//   codex-flow.mjs watch <runId> [--alert-after 秒]     有任务跑满时长或 flow 结束时打印一行并退出
+//   codex-flow.mjs watch <runId> [--alert-after 秒]     等 flow/单发结束并打印汇总；显式阈值才提前提醒
+//   codex-flow.mjs history --backfill                 补录现有运行到 history.jsonl，已有 runId 跳过
+//   flow schema: review / opinion / result / report，或 schema 文件路径
+//   run.sh -j report 回传结论和全文路径；-j review/opinion 回传全文；-r/-f 自动取消归档
 //   codex-flow.mjs stats <runId> [--json]               每个任务的任务说明组成、token 用量、回报大小和验收
 //   codex-flow.mjs clean <runId>                        删掉这次运行的隔离任务留下的私有引用和 worktree
 import fs from "node:fs";
@@ -20,6 +23,8 @@ import { cmdStatus, cmdCancel, cmdSteer, cmdWatch } from "./lib/commands.mjs";
 import { cmdStats } from "./lib/stats.mjs";
 import { SINGLE_FLAGS, cmdCheck, cmdSingleStart, cmdSingleWatch, cmdSingleEnd } from "./lib/single.mjs";
 import { cmdClean } from "./lib/isolation.mjs";
+import { cmdHistory } from "./lib/history.mjs";
+import { cmdUnarchive } from "./lib/threads.mjs";
 
 export { shortCommand, activityOf } from "./lib/activity.mjs";
 export { inScope } from "./lib/scope.mjs";
@@ -59,6 +64,20 @@ function strict({ flags, positionals }, known, maxPositionals, usage) {
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, ...rest] = process.argv.slice(2);
   switch (command) {
+    case "--help": case "-h": case "help":
+      process.stdout.write(`用法:
+  run <plan.json> [--resume <runId>] [--rerun <任务名>]  分阶段运行；续跑可省略计划
+  status [runId] [--all]                             查看运行记录
+  cancel <runId> [任务名]                            停止运行或任务
+  steer <runId> <任务名> "<补充指示>"                 给运行中的任务插话
+  watch <runId> [--alert-after 秒]                    默认等 flow/单发结束，打印 summary.txt 全文；显式阈值才提前提醒
+  history --backfill                                补录现有目录到 history.jsonl，已有 runId 或无 state.json 的目录跳过
+  stats <runId> [--json]                             查看任务计量
+  clean <runId>                                     清理隔离成果
+schema: review / opinion / result / report，或 schema 文件路径。
+run.sh -j review/opinion 回传全文，其余回传至多三行结论和全文路径；-r/-f 自动取消归档。
+`);
+      break;
     case "run": {
       const usage = "用法: run <plan.json> [--resume <runId>] [--rerun <任务名>]";
       const { flags, positionals } = strict(parseArgs(rest, ["resume"], ["rerun"]), ["resume", "rerun"], 1, usage);
@@ -77,11 +96,18 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
     case "watch": await cmdWatch(parseArgs(rest, ["alert-after"])); break;
     case "stats": cmdStats(strict(parseArgs(rest), ["json"], 1, "用法: stats <runId> [--json]")); break;
     case "clean": cmdClean(strict(parseArgs(rest), [], 1, "用法: clean <runId>")); break;
+    case "history": {
+      const parsed = strict(parseArgs(rest), ["backfill"], 0, "用法: history --backfill");
+      if (!parsed.flags.backfill) die("用法: history --backfill");
+      cmdHistory();
+      break;
+    }
+    case "_unarchive": cmdUnarchive(parseArgs(rest, ["thread-id"])); break;
     case "_check": cmdCheck(parseArgs(rest, ["model", "effort", "label"])); break;
     case "_single-watch": await cmdSingleWatch(parseArgs(rest, ["dir"])); break;
     case "_single-start": cmdSingleStart(parseArgs(rest, SINGLE_FLAGS)); break;
     case "_single-end": cmdSingleEnd(parseArgs(rest, [...SINGLE_FLAGS, "code"])); break;
     default:
-      die("用法: run | status | cancel | steer | watch | stats | clean（见文件开头的说明）");
+      die("用法: run | status | cancel | steer | watch | stats | clean | history --backfill（watch 默认等结束；schema: review/opinion/result/report；见文件开头的说明）");
   }
 }

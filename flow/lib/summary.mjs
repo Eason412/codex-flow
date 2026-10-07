@@ -44,23 +44,27 @@ export function conclusionOf(dir, task) {
     return [];
   }
   const clip = (line) => (line.length > 160 ? `${line.slice(0, 159)}…` : line);
-  if (task.result.endsWith(".json")) {
+  if (task.schema || task.result.endsWith(".json")) {
     let data;
     try {
       data = JSON.parse(text);
     } catch {
-      return [];
+      // flow schema 回复不合法时落盘为 md，仍按正文取结论。
+      if (task.result.endsWith(".json")) return [];
     }
-    if (!data || typeof data !== "object" || Array.isArray(data)) return [];
-    const lines = (value) => (typeof value === "string" ? value.split("\n").map((l) => l.trim()).filter(Boolean) : []);
-    const head = [...lines(data.verdict ?? data.status), ...lines(data.confidence).map((c) => `confidence ${c}`)];
-    if (Array.isArray(data.findings)) {
-      const counts = SEVERITY.map((s) => [s, data.findings.filter((f) => f?.severity === s).length]).filter(([, n]) => n);
-      const other = data.findings.length - counts.reduce((n, [, c]) => n + c, 0);
-      if (other) counts.push(["其他", other]);
-      head.push(data.findings.length ? counts.map(([s, n]) => `${n} ${s}`).join(", ") : "无问题");
+    if (data !== undefined) {
+      if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+      const lines = (value) => (typeof value === "string" ? value.split("\n").map((l) => l.trim()).filter(Boolean) : []);
+      const head = [...lines(data.verdict ?? data.status), ...lines(data.confidence).map((c) => `confidence ${c}`)];
+      if (Array.isArray(data.files) && Array.isArray(data.deviations)) head.push(`${data.files.length} 个文件`, `${data.deviations.length} 处偏离`);
+      if (Array.isArray(data.findings)) {
+        const counts = SEVERITY.map((s) => [s, data.findings.filter((f) => f?.severity === s).length]).filter(([, n]) => n);
+        const other = data.findings.length - counts.reduce((n, [, c]) => n + c, 0);
+        if (other) counts.push(["其他", other]);
+        head.push(data.findings.length ? counts.map(([s, n]) => `${n} ${s}`).join(", ") : "无问题");
+      }
+      return [head.join(" · "), ...lines(data.summary ?? data.judgment)].filter(Boolean).slice(0, 3).map(clip);
     }
-    return [head.join(" · "), ...lines(data.summary ?? data.judgment)].filter(Boolean).slice(0, 3).map(clip);
   }
   // 跳过开头的标题行，取第一段；整篇只有标题时用第一个标题
   const paragraph = [];
@@ -110,7 +114,7 @@ export function renderSummary(dir, state) {
     if (reason) lines.push(`    ✗ ${reason}`);
     if (t.checkResults?.length && t.status === "completed") lines.push(`    验收 ${t.checkResults.length}/${t.checks?.length ?? t.checkResults.length} 通过`);
     if (t.scope?.outside?.length) lines.push(`    ⚠ 越界写入：${list(t.scope.outside)}`);
-    if (t.scope?.unclaimed?.length) lines.push(`    ⚠ 范围外变动，来源未定${t.scope.duringChecks ? "（期间有其他任务在跑验收）" : ""}：${list(t.scope.unclaimed)}`);
+    if (t.scope?.unclaimed?.length) lines.push(`    · 工作区另有 ${t.scope.unclaimed.length} 处来源未定的变动（多半是 shell 命令或其他进程写的），清单见 state.json`);
     for (const line of isolationLines(t)) lines.push(`    ${line}`);
     for (const c of t.collisions ?? []) lines.push(`    ⚠ 和「${c.with}」同时改了：${list(c.files)}；先结束的那个验收时还没看到对方的改动，需要时重跑它`);
     if (t.reused && t.stale?.length) lines.push(`    ⚠ 复用的结果之后这些文件改过：${list(t.stale)}；要重跑加 --rerun ${t.label}`);

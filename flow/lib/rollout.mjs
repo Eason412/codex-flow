@@ -19,6 +19,23 @@ export function jsonlObjects(text) {
 
 const sessionRoot = () => path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
 
+// 归档文件的日期布局由 Codex 决定，递归查找，不搬动或改写 rollout。
+export function findArchivedRollout(threadId) {
+  if (!threadId) return null;
+  const visit = (dir) => {
+    for (const entry of fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }) : []) {
+      const file = path.join(dir, entry.name);
+      if (entry.isFile() && matchesRollout(entry.name, threadId)) return file;
+      if (entry.isDirectory()) {
+        const found = visit(file);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return visit(path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "archived_sessions"));
+}
+
 export const matchesRollout = (name, threadId) => name.startsWith("rollout-") &&
   (name.endsWith(`-${threadId}.jsonl`) || name.endsWith(`_${threadId}.jsonl`));
 

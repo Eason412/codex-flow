@@ -4,12 +4,13 @@
 #   -n  状态行和 /flow 面板里显示的名字，默认取任务第一行
 #   -r  接着这个 Codex 对话继续        -f  从这个对话分叉出新对话
 #   -w  在新的 git worktree 里运行（不能和 -r/-f 同用）
-#   -j  按 JSON Schema 返回：review / opinion / result，或 schema 文件路径
+#   -j  按 JSON Schema 返回：review / opinion / result / report，或 schema 文件路径
+#   -r/-f 自动取消已归档对话的归档；review/opinion 回传全文，其余回传结论和全文路径
 set -uo pipefail
 
 usage='用法: run.sh -m <model> -e <effort> [-n <显示名>] [-C <dir>] [-r <thread_id> | -f <thread_id> | -w] [-j <schema>] "<task>"'
 here=$(cd "$(dirname "$0")" && pwd)
-model="" effort="" name="" dir="$PWD" resume="" fork="" worktree="" schema=""
+model="" effort="" name="" dir="$PWD" resume="" fork="" worktree="" schema="" schema_name=""
 while getopts "m:e:n:C:r:f:wj:" opt; do
   case $opt in
     m) model=$OPTARG ;;
@@ -34,11 +35,12 @@ if (( ${#resume} && ${#fork} )) || [[ -n $worktree && -n $resume$fork ]]; then
   exit 2
 fi
 if [[ -n $schema ]]; then
+  schema_name=$schema
   if [[ -f $schema ]]; then
     schema="$(cd "$(dirname "$schema")" && pwd)/$(basename "$schema")"
   else
     schema="$here/schemas/$schema.json"
-    [[ -f $schema ]] || { echo "找不到 schema: ${schema}（内置: review / opinion / result）" >&2; exit 2; }
+    [[ -f $schema ]] || { echo "找不到 schema: ${schema}（内置: review / opinion / result / report）" >&2; exit 2; }
   fi
 fi
 
@@ -55,7 +57,7 @@ echo "[codex] 运行中，日志目录: $run"
 printf '%s' "$task" >"$run/task.txt"
 # 登记参数：_single-start 用；登记失败时 _single-end 用同一组参数补登
 abs_dir=$(cd "$dir" 2>/dev/null && pwd) || abs_dir=$dir
-reg=(--dir "$run" --model "$model" --effort "$effort" --service-tier "$tier" --label "$name" --pid $$ --cwd "$abs_dir" --thread-id "$resume" --forked-from "$fork" --task-file "$run/task.txt")
+reg=(--dir "$run" --model "$model" --effort "$effort" --service-tier "$tier" --label "$name" --pid $$ --cwd "$abs_dir" --thread-id "$resume" --forked-from "$fork" --task-file "$run/task.txt" --schema "$schema_name" --schema-file "$schema")
 # 模型已由上面的 _check 拦下；这里失败只影响面板显示，任务照常运行
 if ! node "$flow" _single-start "${reg[@]}" 2>/dev/null; then
   echo "[codex] ⚠ 没能登记到 Codex 任务面板，任务照常运行"
@@ -73,13 +75,23 @@ stop_single() {
     wait "$codex_pid" 2>/dev/null || true
   fi
   stop_watch
-  node "$flow" _single-end "${reg[@]}" --code "$1" 2>/dev/null
+  node "$flow" _single-end "${reg[@]}" --code "$1"
   exit "$1"
 }
 trap 'stop_single 143' TERM
 trap 'stop_single 130' INT
 
-cd "$dir" || { echo "目录不存在: $dir" >&2; stop_watch; node "$flow" _single-end "${reg[@]}" --code 2 2>/dev/null; exit 2; }
+cd "$dir" || { echo "目录不存在: $dir" >&2; stop_watch; node "$flow" _single-end "${reg[@]}" --code 2; exit 2; }
+if [[ -n $resume$fork ]]; then
+  node "$flow" _unarchive --thread-id "${resume:-$fork}" >"$run/unarchive.log" 2>"$run/stderr.log"
+  code=$?
+  if [[ $code -ne 0 ]]; then
+    stop_watch
+    trap - TERM INT
+    node "$flow" _single-end "${reg[@]}" --code "$code"
+    exit "$code"
+  fi
+fi
 opts=(-m "$model" -c "model_reasoning_effort=$effort"
       --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
       --json -o "$run/last.md")
@@ -99,7 +111,7 @@ wait "$codex_pid"
 code=$?
 stop_watch
 trap - TERM INT
-node "$flow" _single-end "${reg[@]}" --code "$code" 2>/dev/null
+node "$flow" _single-end "${reg[@]}" --code "$code"
 report_code=$?
 [[ $code -ne 0 ]] || code=$report_code
 exit "$code"

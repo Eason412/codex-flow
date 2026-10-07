@@ -14,7 +14,7 @@ export function loadSchema(name) {
   if (!name) return null;
   const file = fs.existsSync(name) ? name : path.join(SCHEMAS, `${name}.json`);
   const schema = readJson(file);
-  if (!schema) die(`找不到 schema: ${name}（内置: review / opinion / result）`);
+  if (!schema) die(`找不到 schema: ${name}（内置: review / opinion / result / report）`);
   return schema;
 }
 

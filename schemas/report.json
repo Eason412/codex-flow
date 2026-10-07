@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "files", "deviations", "open_issues"],
+  "properties": {
+    "status": {"type": "string", "enum": ["done", "partial", "blocked"]},
+    "summary": {"type": "string", "maxLength": 400, "description": "结论，三行以内：做了什么、结果如何、是否需要主代理处理"},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "note"],
+        "properties": {
+          "path": {"type": "string"},
+          "note": {"type": "string", "description": "一句话说明该文件改了什么"}
+        }
+      }
+    },
+    "deviations": {"type": "array", "items": {"type": "string"}, "description": "与任务说明不一致之处及原因"},
+    "open_issues": {"type": "array", "items": {"type": "string"}}
+  }
+}

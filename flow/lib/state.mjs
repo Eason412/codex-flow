@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { ensureHistory } from "./history.mjs";
 
 export const HOME = process.env.CODEX_FLOW_HOME || path.join(os.homedir(), ".claude", "codex-flow");
 export const RUNS = path.join(HOME, "runs");
@@ -157,6 +158,7 @@ export function pruneOldRuns(days = 7, cleanArchive = null) {
       // 续跑可能在取得候选记录后更新状态；删除前重读并重新检查 PID 和时间。
       const latest = readJson(file);
       if (!latest || JSON.stringify(latest) !== JSON.stringify(state) || !expired(latest)) continue;
+      if (!ensureHistory(dir, latest)) continue;
       if (hasArchive(latest)) {
         if (!cleanArchive) continue;
         cleanArchive(latest);

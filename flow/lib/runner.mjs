@@ -15,6 +15,7 @@ import { runTask } from "./task.mjs";
 import { cleanRunArchives, closeActive, isolationFields, isolationNotes } from "./isolation.mjs";
 import { archiveLeftovers } from "./threads.mjs";
 import { overallStatus, phaseStatus, renderSummary } from "./summary.mjs";
+import { appendHistory } from "./history.mjs";
 
 export async function onStop(signal) {
   if (!current) process.exit(143);
@@ -51,6 +52,7 @@ export async function onStop(signal) {
   const summary = renderSummary(current.dir, state);
   fs.writeFileSync(path.join(current.dir, "summary.txt"), summary);
   process.stdout.write(summary);
+  appendHistory(current.dir, state);
   process.exit(143);
 }
 
@@ -272,6 +274,7 @@ function scheduleTasks(dir, state, planTasks, deps) {
 export async function runFlow(planFile, resumeId, rerun = []) {
   const { dir, plan, previous, deps, notes } = prepareFlow(planFile, resumeId, rerun);
   const state = createFlowState(dir, plan);
+  state.resumed = Boolean(resumeId);
   // 计划顶层的 isolation 已由 validatePlan 填进各任务
   const planTasks = new Map(plan.phases.flatMap((p) => p.tasks.map((t) => [t.label, { ...t, phase: p.title }])));
   for (const label of rerun) if (!planTasks.has(label)) die(`--rerun 指向不存在的任务: ${label}`);
@@ -301,6 +304,7 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   const summary = renderSummary(dir, state);
   fs.writeFileSync(path.join(dir, "summary.txt"), summary);
   process.stdout.write(summary);
+  appendHistory(dir, state);
   try {
     pruneOldRuns(7, cleanRunArchives);
   } catch {
@@ -308,4 +312,3 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   }
   process.exit(state.status === "completed" ? 0 : 1);
 }
-

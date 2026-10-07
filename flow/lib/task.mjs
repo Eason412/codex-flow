@@ -79,6 +79,10 @@ function handleNotification(run, message) {
   if (message.method === "thread/tokenUsage/updated") {
     const total = p.tokenUsage?.total?.totalTokens;
     if (typeof total === "number") task.tokens = total;
+    const usage = p.tokenUsage?.total;
+    const fields = { input: usage?.inputTokens, cachedInput: usage?.cachedInputTokens, output: usage?.outputTokens };
+    const known = Object.entries(fields).filter(([, n]) => Number.isFinite(n) && n >= 0);
+    if (known.length) task.tokenUsage = Object.fromEntries(known);
     // 面板照 Claude Code 的口径显示：最近一次调用的输入（当前上下文）+ 累计输出；tokens 保留累计用量供统计
     const context = p.tokenUsage?.last?.inputTokens;
     const output = p.tokenUsage?.total?.outputTokens;

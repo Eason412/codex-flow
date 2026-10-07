@@ -58,19 +58,22 @@ export function cmdSteer({ positionals }) {
   process.stdout.write(`[codex-flow] 已发给「${label}」\n`);
 }
 
-// 后台 Bash 跑它：第一个任务跑满时长或整个 flow 结束时打印一行并退出，退出即通知主代理
+// 后台 Bash 重新接上运行：默认等到结束并回传汇总；显式阈值才提前提醒。
 export async function cmdWatch({ flags, positionals }) {
   const runId = positionals[0];
   if (!runId) die("用法: watch <runId> [--alert-after 秒]");
-  const alertAfter = Number(flags["alert-after"] ?? process.env.CODEX_FLOW_ALERT_AFTER ?? 900);
+  const alertAfter = Object.hasOwn(flags, "alert-after") ? Number(flags["alert-after"]) : null;
+  if (alertAfter !== null && (!Number.isFinite(alertAfter) || alertAfter < 0)) die("--alert-after 必须是非负秒数");
   for (;;) {
     const { dir, state } = findRun(runId);
     const status = effectiveStatus(state);
     if (status !== "running") {
-      process.stdout.write(`[codex-flow] ${state.name} 已结束：${WORD[status] ?? status}，汇总见 ${path.join(dir, "summary.txt")}\n`);
+      const summary = path.join(dir, "summary.txt");
+      if (fs.existsSync(summary)) process.stdout.write(fs.readFileSync(summary, "utf8"));
+      else process.stdout.write(`[codex-flow] ${state.name} 已结束：${WORD[status] ?? status}，汇总见 ${summary}\n`);
       return;
     }
-    const slow = state.tasks.find((t) => t.status === "running" && elapsedSeconds(t.startedAt) >= alertAfter);
+    const slow = alertAfter === null ? null : state.tasks.find((t) => t.status === "running" && elapsedSeconds(t.startedAt) >= alertAfter);
     if (slow) {
       process.stdout.write(`[codex-flow] 任务「${slow.label}」已运行 ${formatDuration(elapsedSeconds(slow.startedAt))}，请检查日志 ${path.join(dir, slow.log)} 并向用户汇报\n`);
       return;

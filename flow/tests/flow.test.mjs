@@ -89,13 +89,13 @@ for (const [name, source, expected] of [
   ['空对象', '{}', '{}'], ['空数组', '[]', '[]'], ['数值标量', '1.0', '1.0'],
 ]) test(`JSON 排版：${name}`, () => assert.equal(indentJson(source), expected));
 
-test('_single-end 的非 JSON 回复去首尾空白，输出格式不变', () => {
+test('_single-end 的非 JSON 回复回传结论和全文路径', () => {
   const dir = single();
   fs.appendFileSync(path.join(dir, 'events.jsonl'), line({ type: 'turn.completed', usage: usage(20, 10) }));
   fs.writeFileSync(path.join(dir, 'last.md'), ' \n 中文正文\n第二行 \n\t');
   const result = command(['_single-end', '--dir', dir, '--code', '0']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.ok(result.stdout.endsWith('----- Codex 最终回复 -----\n中文正文\n第二行\n'));
+  assert.ok(result.stdout.endsWith(`----- Codex 结论 -----\n中文正文\n第二行\n全文: ${path.join(dir, 'last.md')}\n`));
   assert.equal(readJson(statePath(dir)).tasks[0].tokens, 30);
 });
 
@@ -290,7 +290,7 @@ for (const value of [null, {}, { models: [], efforts: ['high'] }, { models: ['x'
 
 test('模型名单缺失、无效 JSON 不阻止模块加载，校验时才报错（仅操作临时副本）', () => {
   const lib = path.join(root, 'isolated/flow/lib'); fs.mkdirSync(lib, { recursive: true });
-  fs.copyFileSync(path.join(skill, 'flow/lib/state.mjs'), path.join(lib, 'state.mjs'));
+  fs.cpSync(path.join(skill, 'flow/lib'), lib, { recursive: true });
   const file = path.join(root, 'isolated/models.json');
   for (const content of [undefined, '{broken', '{}']) {
     if (content !== undefined) fs.writeFileSync(file, content);
@@ -357,8 +357,10 @@ for (const mode of ['new', 'resume', 'fork']) test(`假 codex 端到端 run.sh�
   assert.equal(final.tasks[0].actualServiceTier, resumed ? 'priority' : null);
   if (resumed) assert.match(result.stdout, /实际使用: model=gpt-6\.1-sol effort=high service_tier=priority /);
   else assert.match(result.stdout, /Fast: 已请求 service_tier=priority；新开的 exec 会话记录不写 tier，无法核实/);
-  assert.match(result.stdout, /"整数": 9007199254740993/);
-  assert.match(result.stdout, /"浮点": 1\.0/);
+  assert.match(result.stdout, /Codex 结论/);
+  assert.match(result.stdout, /全文: /);
+  assert.match(fs.readFileSync(path.join(dir, 'last.md'), 'utf8'), /"整数":9007199254740993/);
+  assert.match(fs.readFileSync(path.join(dir, 'last.md'), 'utf8'), /"浮点":1\.0/);
   const status = command(['status'], { env });
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /完成/);
@@ -540,7 +542,7 @@ test('写入范围：越界的改文件记录标出，同时段 shell 写入只�
   assert.deepEqual(scope('丁').outside, ['e/r.md']);
   assert.equal(scope('戊'), null, '没写 writes 不检查');
   assert.ok(state.tasks.every((t) => t.status === 'completed'));
-  assert.match(result.stdout, /✓ 甲 .*\n    ⚠ 越界写入：z\/out\.md\n    ⚠ 范围外变动，来源未定：d\/z\.md\n/);
+  assert.match(result.stdout, /✓ 甲 .*\n    ⚠ 越界写入：z\/out\.md\n    · 工作区另有 1 处来源未定的变动（多半是 shell 命令或其他进程写的），清单见 state\.json\n/);
   const prompt = fs.readFileSync(path.join(dir, 'logs/丁.prompt.txt'), 'utf8');
   assert.match(prompt, /codex-flow 约束：\n这是只读任务，不要修改任何文件。$/);
   assert.match(fs.readFileSync(path.join(dir, 'logs/甲.prompt.txt'), 'utf8'), /只修改这些路径（相对工作目录）：a\/\*\*。/);
@@ -1112,7 +1114,7 @@ process.exit(result.status ?? 1);
     const result = spawnSync('bash', [path.join(isolated, 'run.sh'), '-m', 'gpt-6.1-sol', '-e', 'high', '-C', root, '测试'], { env, encoding: 'utf8', timeout: 30000 });
     assert.match(result.stdout, /没能登记到 Codex 任务面板，任务照常运行/, result.stdout + result.stderr);
     assert.ok(fs.existsSync(marks[2]), 'Codex 仍被调用');
-    assert.match(result.stdout, /Codex 最终回复/);
+    assert.match(result.stdout, /Codex 结论/);
     // 结束时补登：报告照常、不算出错，Codex 成功就返回 0
     assert.doesNotMatch(result.stdout, /报告出错/);
     assert.equal(result.status, 0, result.stdout + result.stderr);

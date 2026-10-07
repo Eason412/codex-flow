@@ -2,6 +2,18 @@
 // app-server 开的对话 Codex 记为交互会话，不归档就会出现在桌面端的「最近」和「项目」里。CODEX_FLOW_ARCHIVE_THREADS=0 时不归档
 import { AppServer } from "./appserver.mjs";
 import { servers } from "./runtime.mjs";
+import { spawnSync } from "node:child_process";
+import { findArchivedRollout } from "./rollout.mjs";
+
+// CLI 帮助确认的命令：codex unarchive <SESSION>。先查归档文件，免去一次必失败的 exec。
+export function cmdUnarchive({ flags }) {
+  if (!findArchivedRollout(flags["thread-id"])) return;
+  const result = spawnSync("codex", ["unarchive", flags["thread-id"]], { encoding: "utf8", timeout: 30000 });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.error) process.stderr.write(`[codex] 取消归档失败: ${result.error.message}\n`);
+  process.exitCode = result.status ?? 1;
+}
 
 const ARCHIVE_TIMEOUT_MS = 5000;
 const archiving = () => process.env.CODEX_FLOW_ARCHIVE_THREADS !== "0";

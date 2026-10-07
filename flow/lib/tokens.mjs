@@ -2,7 +2,47 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readJson, writeJson, statePath, isAlive } from "./state.mjs";
-import { findRollout, readCompleteRecords } from "./rollout.mjs";
+import { findRollout, findArchivedRollout, readCompleteRecords } from "./rollout.mjs";
+
+const USAGE_FIELDS = { input: "input_tokens", cachedInput: "cached_input_tokens", output: "output_tokens" };
+function usageParts(usage) {
+  return Object.fromEntries(Object.entries(USAGE_FIELDS).filter(([, key]) => Number.isFinite(usage?.[key]) && usage[key] >= 0).map(([name, key]) => [name, usage[key]]));
+}
+
+function applyUsageParts(task, total, last = null) {
+  const values = usageParts(total);
+  const previous = usageParts(last);
+  task.usageBaseline ??= {};
+  const own = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (!Number.isFinite(task.usageBaseline[key]) && Number.isFinite(previous[key]) && value >= previous[key]) task.usageBaseline[key] = value - previous[key];
+    const baseline = task.usageBaseline[key];
+    if (Number.isFinite(baseline) && value >= baseline) own[key] = value - baseline;
+  }
+  if (Object.keys(own).length) task.tokenUsage = own;
+}
+
+// 历史补录读原始累计值；缺字段或缺基线时留空，不按当前上下文猜累计输入。
+export function tokenBreakdown(task, startedAt, endedAt, kind) {
+  if (task.tokenUsage) return task.tokenUsage;
+  const copy = structuredClone(task);
+  const file = findRollout(task.threadId) ?? findArchivedRollout(task.threadId);
+  if (!file) return null;
+  const records = readCompleteRecords(file, { offset: 0 });
+  if (kind === "flow" || (!task.resumed && !task.forkedFrom)) copy.usageBaseline = { input: 0, cachedInput: 0, output: 0 };
+  else {
+    let latest = -Infinity;
+    for (const event of records) {
+      const timestamp = Date.parse(event.timestamp), info = tokenInfo(event);
+      if (info && timestamp < Date.parse(startedAt) && timestamp >= latest) {
+        latest = timestamp;
+        copy.usageBaseline = usageParts(info.total_token_usage);
+      }
+    }
+  }
+  applyTokenRecords(copy, records, startedAt, endedAt);
+  return copy.tokenUsage ?? null;
+}
 
 export function usageTokens(usage) {
   if (!usage || !Number.isFinite(usage.input_tokens) || !Number.isFinite(usage.output_tokens) ||
@@ -43,6 +83,10 @@ export function applyTokenRecords(task, records, startedAt, endedAt = null) {
     const info = tokenInfo(event);
     if (!info) continue;
     const total = usageTokens(info.total_token_usage);
+    const beforeParts = JSON.stringify([task.usageBaseline, task.tokenUsage]);
+    if (!task.resumed && !task.forkedFrom) task.usageBaseline ??= { input: 0, cachedInput: 0, output: 0 };
+    applyUsageParts(task, info.total_token_usage, info.last_token_usage);
+    if (JSON.stringify([task.usageBaseline, task.tokenUsage]) !== beforeParts) changed = true;
     if (!Number.isFinite(task.tokenBaseline)) {
       const last = usageTokens(info.last_token_usage);
       if (last === null || last > total) continue;
@@ -115,6 +159,7 @@ export function settleSingleTokens(task, startedAt, endedAt, usage) {
     if (!task.resumed && !task.forkedFrom) {
       task.tokenBaseline = 0;
       task.outputBaseline ??= 0;
+      task.usageBaseline ??= { input: 0, cachedInput: 0, output: 0 };
     } else {
       let latest = -Infinity;
       for (const event of records) {
@@ -123,6 +168,7 @@ export function settleSingleTokens(task, startedAt, endedAt, usage) {
         if (timestamp < Date.parse(startedAt) && timestamp >= latest && info) {
           latest = timestamp;
           task.tokenBaseline = usageTokens(info.total_token_usage);
+          task.usageBaseline = usageParts(info.total_token_usage);
           if (Number.isFinite(info.total_token_usage.output_tokens)) task.outputBaseline = info.total_token_usage.output_tokens;
         }
       }
@@ -133,5 +179,6 @@ export function settleSingleTokens(task, startedAt, endedAt, usage) {
   const total = usageTokens(usage);
   if (total !== null && Number.isFinite(task.tokenBaseline) && total >= task.tokenBaseline) {
     task.tokens = total - task.tokenBaseline;
+    applyUsageParts(task, usage);
   }
 }

@@ -6,8 +6,11 @@ import { cleanArchives } from "./archive.mjs";
 import { ALERT_AFTER, die, SESSION } from "./runtime.mjs";
 import { jsonlObjects, singleContext } from "./rollout.mjs";
 import { settleSingleTokens, watchSingle } from "./tokens.mjs";
+import { conclusionOf, renderSummary } from "./summary.mjs";
+import { measureInput, meterReport } from "./meter.mjs";
+import { appendHistory } from "./history.mjs";
 
-export const SINGLE_FLAGS = ["dir", "model", "effort", "service-tier", "label", "pid", "cwd", "thread-id", "forked-from", "task-file"];
+export const SINGLE_FLAGS = ["dir", "model", "effort", "service-tier", "label", "pid", "cwd", "thread-id", "forked-from", "task-file", "schema", "schema-file"];
 
 export function cmdSingleStart({ flags }) {
   const task = fs.readFileSync(flags["task-file"], "utf8");
@@ -19,11 +22,13 @@ export function cmdSingleStart({ flags }) {
 // 单发任务的登记内容；_single-start 写，登记失败时 _single-end 用同样的参数补登
 function singleState(flags, task, startedAt) {
   const label = flags.label || briefOf(task, 16);
+  const schema = flags["schema-file"] ? readJson(flags["schema-file"]) : null;
   return {
     version: 1, kind: "single", runId: path.basename(flags.dir), name: label, session: SESSION,
-    pid: Number(flags.pid), cwd: path.resolve(flags.cwd), alertAfter: ALERT_AFTER, status: "running", startedAt, endedAt: null,
+    pid: Number(flags.pid), cwd: path.resolve(flags.cwd), alertAfter: ALERT_AFTER, status: "running", startedAt, endedAt: null, resumed: Boolean(flags["thread-id"]),
     phases: [{ title: "任务", status: "running" }],
     tasks: [{ label, phase: "任务", model: flags.model, effort: flags.effort, ...(flags["service-tier"] ? { serviceTier: flags["service-tier"] } : {}), threadId: flags["thread-id"] || null, resumed: Boolean(flags["thread-id"]), forkedFrom: flags["forked-from"] || null,
+      ...(flags.schema ? { schema: flags.schema } : {}), input: measureInput(task, task, [], [], schema),
       brief: briefOf(task), status: "running", startedAt, log: "events.jsonl" }],
   };
 }
@@ -124,6 +129,7 @@ function endSingle(dir, code, flags = {}) {
   task.actualEffort = null;
   task.actualServiceTier = null;
   if (fs.existsSync(path.join(dir, "last.md"))) task.result = "last.md";
+  meterReport(dir, task);
   const ok = code === "0" && finished;
   const status = ok ? "completed" : stopped ? "cancelled" : "failed";
   task.status = status;
@@ -134,8 +140,13 @@ function endSingle(dir, code, flags = {}) {
   state.status = status;
   state.endedAt = at;
   writeJson(file, state);
-  if (eventsError) throw eventsError;
-  reportSingle(dir, code, state, events);
+  try {
+    if (eventsError) throw eventsError;
+    reportSingle(dir, code, state, events);
+  } finally {
+    appendHistory(dir, state);
+    fs.writeFileSync(path.join(dir, "summary.txt"), renderSummary(dir, state));
+  }
 }
 
 // JSON.parse 只校验合法性；排版直接扫描原文，保留字符串转义和数字字面值。
@@ -201,17 +212,23 @@ export function cmdSingleEnd({ flags }) {
   try {
     const last = path.join(flags.dir, "last.md");
     if (fs.existsSync(last)) {
-      let text = fs.readFileSync(last, "utf8");
-      if (!reportFailed) {
-        // 和原来的 Python 版一样先去掉首尾空白
-        text = text.trim();
-        try {
-          text = indentJson(text);
-        } catch {
-          // 非 JSON 回复保留原文。
+      const state = readJson(statePath(flags.dir));
+      const task = state?.tasks?.[0] ?? { result: "last.md", schema: flags.schema };
+      if (!["opinion", "review"].includes(task.schema)) {
+        process.stdout.write(`----- Codex 结论 -----\n${conclusionOf(flags.dir, task).join("\n")}\n全文: ${path.resolve(last)}\n`);
+      } else {
+        let text = fs.readFileSync(last, "utf8");
+        if (!reportFailed) {
+          // 和原来的 Python 版一样先去掉首尾空白
+          text = text.trim();
+          try {
+            text = indentJson(text);
+          } catch {
+            // 非 JSON 回复保留原文。
+          }
         }
+        process.stdout.write(`----- Codex 最终回复 -----\n${text}${text.endsWith("\n") ? "" : "\n"}`);
       }
-      process.stdout.write(`----- Codex 最终回复 -----\n${text}${text.endsWith("\n") ? "" : "\n"}`);
     }
   } catch (error) {
     fail(error);
