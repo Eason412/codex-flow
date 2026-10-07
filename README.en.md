@@ -16,7 +16,7 @@ Current version: [V0.4.0](https://github.com/Eason412/codex-flow/releases/tag/V0
 ## ✨ Features
 
 - 🧭 **Phased orchestration and parallel execution**: Tasks within a phase run in parallel and phases run in order; a task with `after` starts as soon as its prerequisites finish, forming a pipeline. Tasks with overlapping write scopes queue automatically, and worktree isolation is available when several tasks must change the same files at once.
-- 📺 **Native interface integration**: A task panel opens above the prompt when a task starts, laid out like Claude's Workflow detail view, showing progress and results and accepting extra instructions for running tasks. Stopping and completion notices match Claude Code's background tasks, and Claude receives a check-in reminder every 15 minutes a task runs.
+- 📺 **Native interface integration**: A task panel opens above the prompt when a task starts, laid out like Claude's Workflow detail view, showing progress and results and accepting extra instructions for running tasks. Stopping and completion notices match Claude Code's background tasks, run time is shown only in the panel, and Claude receives one check-in reminder if the executor process exits unexpectedly.
 - 📏 **Context and usage control**: Each task's full reply is saved to a result file, and Claude reads a conclusion of up to three lines per task. Task briefs are measured by part, and the `stats` command lists each task's brief composition, token usage and reply size for comparing the cost of different splits.
 - ♻️ **Acceptance checks and result reuse**: A task can declare acceptance commands and completes only when all of them pass. Resuming reruns only changed tasks and their downstream tasks; based on a snapshot of workspace contents, read-only tasks rerun when relevant files change, and reused results of writing tasks are marked stale.
 - 🔍 **Model control and verification**: `models.json` defines the allowed models and efforts, refuses other requests before they start, and names the models that use Fast by default. The model and effort in each report come from Codex's own session log and are marked ⚠ when they differ from the request or cannot be verified.
@@ -31,7 +31,7 @@ Claude Code main conversation
          ▼
  ~/.claude/codex-flow/runs/<runId>/
          │ read by
-         ├─► codex-flow mod    panel above the prompt, 15-minute check-ins
+         ├─► codex-flow mod    panel above the prompt, check-ins when a run is lost
          └─► statusline.mjs    one progress line while the panel is hidden
 ```
 
@@ -39,7 +39,7 @@ Claude Code main conversation
 | --- | --- |
 | `run.sh` | Runs one Codex task, records its state and reports the actual model |
 | codex-flow executor | Reads the plan, schedules by dependency, writes state, progress, results and a summary |
-| codex-flow mod | Task panel, `/flow` command, stopping and steering, 15-minute check-ins |
+| codex-flow mod | Task panel, `/flow` command, stopping and steering, check-ins when a run is lost |
 | `statusline.mjs` | Called by ccstatusline; shows one progress line while the panel is hidden |
 | `SKILL.md` | Claude's delegation rules: when to dispatch, how to split, which model to use |
 | `models.json` | Allowed models and efforts, and the models that use Fast by default |
@@ -100,7 +100,7 @@ Have an agent read [SETUP.md](SETUP.md) and follow its steps for installation, c
 | --- | --- | --- |
 | Allowed models and efforts | `models.json` | Other models and efforts are refused |
 | Models that use Fast by default | `fast` in `models.json` | Limited to models listed in `models`; omitted or empty means none |
-| Check-in interval | `CODEX_FLOW_ALERT_AFTER` in the `env` block of `~/.claude/settings.json` | Seconds, default 900 |
+| Duration notice interval | `CODEX_FLOW_ALERT_AFTER` in the `env` block of `~/.claude/settings.json` | Seconds, default 900; shown as an on-screen notice only, not sent to the conversation |
 | Run record location | `CODEX_FLOW_HOME` in the `env` block of `~/.claude/settings.json` | Default `~/.claude/codex-flow` |
 | Codex thread archiving | `CODEX_FLOW_ARCHIVE_THREADS` in the `env` block of `~/.claude/settings.json` | On by default; `0` turns it off |
 | Isolated task limit | `CODEX_FLOW_MAX_WORKTREES` in the `env` block of `~/.claude/settings.json` | Default 4; further isolated tasks wait |
@@ -137,9 +137,10 @@ Have an agent read [SETUP.md](SETUP.md) and follow its steps for installation, c
 | `flow/codex-flow.mjs status [runId]` | Show this session's runs |
 | `flow/codex-flow.mjs cancel <runId> [task]` | Stop the whole flow or one task |
 | `flow/codex-flow.mjs steer <runId> <task> "<text>"` | Add instructions to a running task |
-| `flow/codex-flow.mjs watch <runId>` | Print one line and exit when a task reaches the check-in time or the flow ends |
+| `flow/codex-flow.mjs watch <runId> [--alert-after seconds]` | Wait until the run ends and print its summary; with `--alert-after`, exit early once a task reaches that duration |
+| `flow/codex-flow.mjs history --backfill` | Add runs not yet recorded to the long-term summary `history.jsonl` |
 
-Run the `.mjs` commands with `node`; paths are relative to `~/.claude/skills/codex`. All plan fields are described in [SKILL.md](SKILL.md) (Chinese).
+Run the `.mjs` commands with `node`; paths are relative to `~/.claude/skills/codex`. All plan fields are described in [docs/flow-plan.md](docs/flow-plan.md) (Chinese).
 
 ## 📁 Repository layout
 
@@ -150,8 +151,7 @@ Run the `.mjs` commands with `node`; paths are relative to `~/.claude/skills/cod
 | [run.sh](run.sh) | Entry point for one task |
 | [flow/](flow/) | codex-flow executor, status line script and tests |
 | [mod/](mod/) | Task panel mod and its tests |
-| [agents/codex-runner.md](agents/codex-runner.md) | Claude subagent that runs routine tasks in the background (Chinese) |
-| [schemas/](schemas/) | Built-in `review`, `opinion` and `result` reply formats |
+| [schemas/](schemas/) | Built-in `review`, `opinion`, `result` and `report` reply formats |
 | [models.json](models.json) | Allowed models and efforts, and the models that use Fast by default |
 
 ## 🤝 Contributing

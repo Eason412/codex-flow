@@ -16,7 +16,7 @@
 ## ✨ 特点
 
 - 🧭 **阶段编排与并行执行**：同一阶段的任务并行运行，阶段之间依次推进；声明了 `after` 的任务在前置任务完成后立即启动，形成流水线。写入范围重叠的任务自动排队，确需同时修改同一批文件时可启用 worktree 隔离。
-- 📺 **原生界面集成**：任务启动时，输入框上方自动出现任务面板，布局参照 Claude Workflow 的详情面板，可查看过程与结果，并向运行中的任务追加指示。停止、完成通知与 Claude Code 的后台任务一致；任务每运行 15 分钟，Claude 收到一次排查提醒。
+- 📺 **原生界面集成**：任务启动时，输入框上方自动出现任务面板，布局参照 Claude Workflow 的详情面板，可查看过程与结果，并向运行中的任务追加指示。停止、完成通知与 Claude Code 的后台任务一致；运行时长只显示在面板上；执行器进程意外退出时，Claude 收到一次排查提醒。
 - 📏 **上下文与用量控制**：任务的完整回复保存在结果文件中，Claude 只读取每个任务三行以内的结论。任务说明按组成部分计量，`stats` 命令列出各任务的说明构成、token 用量与回报大小，用于比较不同拆分方式的开销。
 - ♻️ **验收与结果复用**：任务可声明验收命令，全部通过才记为完成。续跑时只重新执行修改过的任务及其下游；依据工作区内容快照，只读任务在相关文件变化后自动重跑，写入任务的复用结果标注为过期。
 - 🔍 **模型管控与核实**：`models.json` 规定允许的模型与 effort，名单外的请求在启动前被拒绝，并可指定默认使用 Fast 的模型。报告中的模型与 effort 取自 Codex 自身的会话记录，与请求不符或无法核实时标注 ⚠。
@@ -31,7 +31,7 @@ Claude Code 主对话
          ▼
  ~/.claude/codex-flow/runs/<runId>/
          │ 读取
-         ├─► codex-flow mod    输入框上方的面板、15 分钟提醒
+         ├─► codex-flow mod    输入框上方的面板、异常提醒
          └─► statusline.mjs    面板收起时状态行中的一行进度
 ```
 
@@ -39,7 +39,7 @@ Claude Code 主对话
 | --- | --- |
 | `run.sh` | 运行单个 Codex 任务，登记状态并报告实际模型 |
 | codex-flow 执行器 | 读取计划、按依赖调度，写入状态、过程、结果与汇总 |
-| codex-flow mod | 任务面板、`/flow` 命令、停止与追加指示、15 分钟提醒 |
+| codex-flow mod | 任务面板、`/flow` 命令、停止与追加指示、异常提醒 |
 | `statusline.mjs` | 供 ccstatusline 调用，面板收起时显示一行进度 |
 | `SKILL.md` | Claude 的委派规则：何时派发、如何拆分、选用哪个模型 |
 | `models.json` | 允许的模型与 effort、默认使用 Fast 的模型 |
@@ -100,7 +100,7 @@ Claude Code 主对话
 | --- | --- | --- |
 | 允许的模型和 effort | `models.json` | 名单外的模型和 effort 直接拒绝 |
 | 默认使用 Fast 的模型 | `models.json` 的 `fast` | 限于 `models` 中已列出的模型；省略或留空时均不使用 |
-| 提醒间隔 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ALERT_AFTER` | 单位为秒，默认 900 |
+| 时长提示间隔 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ALERT_AFTER` | 单位为秒，默认 900；只弹界面提示，不进对话 |
 | 运行记录位置 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_HOME` | 默认 `~/.claude/codex-flow` |
 | Codex 会话归档 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_ARCHIVE_THREADS` | 默认归档，设为 `0` 时关闭 |
 | 隔离任务并发上限 | `~/.claude/settings.json` 的 `env`：`CODEX_FLOW_MAX_WORKTREES` | 默认 4，超出的隔离任务排队 |
@@ -137,9 +137,10 @@ Claude Code 主对话
 | `flow/codex-flow.mjs status [runId]` | 查看本会话的运行记录 |
 | `flow/codex-flow.mjs cancel <runId> [任务名]` | 停止整个 flow 或其中一个任务 |
 | `flow/codex-flow.mjs steer <runId> <任务名> "<内容>"` | 向运行中的任务追加指示 |
-| `flow/codex-flow.mjs watch <runId>` | 任务运行达到提醒时长或 flow 结束时输出一行并退出 |
+| `flow/codex-flow.mjs watch <runId> [--alert-after 秒]` | 等到运行结束并打印汇总；给出 `--alert-after` 时任务跑满该时长就提前退出 |
+| `flow/codex-flow.mjs history --backfill` | 把尚未记录的运行补进长期摘要 `history.jsonl` |
 
-`.mjs` 命令用 `node` 运行，路径相对于 `~/.claude/skills/codex`。计划字段的完整说明见 [SKILL.md](SKILL.md)。
+`.mjs` 命令用 `node` 运行，路径相对于 `~/.claude/skills/codex`。计划字段的完整说明见 [docs/flow-plan.md](docs/flow-plan.md)。
 
 ## 📁 仓库结构
 
@@ -150,8 +151,7 @@ Claude Code 主对话
 | [run.sh](run.sh) | 单个任务入口 |
 | [flow/](flow/) | codex-flow 执行器、状态行脚本与测试 |
 | [mod/](mod/) | 任务面板 mod 及其测试 |
-| [agents/codex-runner.md](agents/codex-runner.md) | 在后台代跑常规任务的 Claude 子代理 |
-| [schemas/](schemas/) | 内置的 `review`、`opinion`、`result` 返回格式 |
+| [schemas/](schemas/) | 内置的 `review`、`opinion`、`result`、`report` 返回格式 |
 | [models.json](models.json) | 允许的模型与 effort、默认使用 Fast 的模型 |
 
 ## 🤝 贡献须知

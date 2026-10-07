@@ -4,10 +4,10 @@ This manual is for AI coding agents (Claude Code and similar) that set up Codex 
 
 ## Ground rules
 
-- Ask the user first before you: replace or move an existing `~/.claude/skills/codex` or `~/.claude/agents/codex-runner.md`; edit `~/.claude/settings.json`; edit the status line configuration; run a real Codex task (step 8 spends model quota).
+- Ask the user first before you: replace or move an existing `~/.claude/skills/codex`; edit `~/.claude/settings.json`; edit the status line configuration; run a real Codex task (step 7 spends model quota).
 - Signing in to Codex (`codex login`) is the user's job. Pause and ask them to do it. Never print tokens or the contents of `~/.codex/auth.json`.
 - When a success condition fails, stop and report the command's output. Do not retry with other flags at random.
-- The install path must be `~/.claude/skills/codex`: [SKILL.md](SKILL.md) and [agents/codex-runner.md](agents/codex-runner.md) call `~/.claude/skills/codex/run.sh` by that path.
+- The install path must be `~/.claude/skills/codex`: [SKILL.md](SKILL.md) calls `~/.claude/skills/codex/run.sh` by that path.
 
 ## 1. Check prerequisites
 
@@ -48,18 +48,7 @@ node ~/.claude/skills/codex/flow/codex-flow.mjs _check --model <model> --effort 
 
 exits with code 0 and prints nothing.
 
-## 4. Install the subagent
-
-[agents/codex-runner.md](agents/codex-runner.md) is the Claude subagent that runs routine Codex tasks in the background. If `~/.claude/agents/codex-runner.md` exists, ask before replacing it.
-
-```bash
-mkdir -p ~/.claude/agents
-ln -s ~/.claude/skills/codex/agents/codex-runner.md ~/.claude/agents/codex-runner.md
-```
-
-Success: `~/.claude/agents/codex-runner.md` resolves to the file in this repository.
-
-## 5. Load the mod
+## 4. Load the mod
 
 The task panel is the mod in [mod/](mod/). Claude Code loads it from the `CLAUDE_CODE_PLUGIN_DIRS` variable in the `env` block of `~/.claude/settings.json` (project settings are not read for this variable). Ask before editing the file, then set:
 
@@ -75,7 +64,7 @@ Merge with the existing `env` block. If `CLAUDE_CODE_PLUGIN_DIRS` already has a 
 
 Success: `claude plugin validate ~/.claude/skills/codex/mod` prints `Validation passed` (a missing-author warning is fine).
 
-## 6. Add the status line entry (optional)
+## 5. Add the status line entry (optional)
 
 When the panel is hidden, [flow/statusline.mjs](flow/statusline.mjs) prints one line of progress for the session's Codex tasks. It reads the status line JSON (`session_id`) from stdin, prints nothing when there is nothing to show, and needs colors preserved.
 
@@ -84,13 +73,13 @@ When the panel is hidden, [flow/statusline.mjs](flow/statusline.mjs) prints one 
 
 Success: `echo '{"session_id":"none"}' | node ~/.claude/skills/codex/flow/statusline.mjs` exits with code 0 and prints nothing.
 
-## 7. Restart Claude Code
+## 6. Restart Claude Code
 
 Ask the user to start a new Claude Code session; sessions that were already open do not load the mod.
 
 Success: in the new session, typing `/flow` answers `已在输入框上方打开 Codex 任务面板。…`, and the panel above the prompt reads `本会话还没有派出 Codex 任务。`.
 
-## 8. Run one real task
+## 7. Run one real task
 
 This spends Codex quota; ask first. In the new Claude Code session, run (use an allowed model and effort):
 
@@ -104,7 +93,7 @@ Success:
 - The output contains a `[codex] 实际使用: …` line without `⚠`.
 - While it runs, the panel shows `安装测试` with a blue `agent` label.
 
-## 9. Run the tests (optional)
+## 8. Run the tests (optional)
 
 ```bash
 cd ~/.claude/skills/codex
