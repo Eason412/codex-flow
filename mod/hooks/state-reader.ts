@@ -93,6 +93,8 @@ export type ReaderContext = {
   stateMtime: (dir: string) => Promise<number | null>
   alivePids: (pids: number[]) => Promise<Set<number>>
   current: () => Promise<FlowRun[]>
+  // 提醒读取全部本会话运行，不受面板历史条数限制。
+  collect: (list: FlowRun[]) => void
   record: (list: FlowRun[], errors: string[], newErrors: string[]) => void
 }
 
@@ -191,8 +193,9 @@ export async function readRunList(ctx: ReaderContext) {
   const alive = await ctx.alivePids(found.filter(r => r.state.status === 'running').map(r => Number(r.state.pid)))
   // 先检查所有进程再限历史条数，失联的运行也按非运行计数。
   let history = 0
-  const list = found.map(r => toRun(r.dir, r.state, ctx.now, alive, ctx.lostSince))
-    .filter(r => r.status === 'running' || history++ < MAX_RUNS)
+  const all = found.map(r => toRun(r.dir, r.state, ctx.now, alive, ctx.lostSince))
+  ctx.collect(all)
+  const list = all.filter(r => r.status === 'running' || history++ < MAX_RUNS)
   ctx.record(list, errors, newErrors)
   return list
 }

@@ -52,7 +52,7 @@ const FLOW_CMD = { command: 'flow', args: '', origin: { kind: 'composer' }, pres
 
 type World = { writes: string[]; prompts: string[]; toasts: string[]; logs: { text: string; to: string }[]; killed: string[][]; alive: number[]; files: Record<string, string>; mtimes: Record<string, number>; dirs: string[]; failList: boolean; rootExists: boolean; failReads: string[]; windowStarts: WindowStarts; focuses: string[]; failWrites?: RegExp; beforeManualAutoSet?: () => Promise<void>; beforePanelWrite?: (text: string) => Promise<void> }
 
-function world(on: On): World {
+function world(on: On, env: Record<string, string> = { HOME: '/home/me' }): World {
   const w: World = {
     writes: [],
     prompts: [],
@@ -75,7 +75,7 @@ function world(on: On): World {
       [`${ROOT}/r-1/results/安全.md`]: '## 结论\n没有发现注入问题。',
     },
   }
-  mock.env(on, { HOME: '/home/me' })
+  mock.env(on, env)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -329,39 +329,161 @@ test('只有一个 flow 在跑时直接进它的阶段栏，最外层没有返�
   await ui.unmount()
 })
 
-test('任务每跑满 15 分钟在对话里提醒一次，不重复、不停任务', async ($, on) => {
+test('任务每跑满 15 分钟只 toast 一次，主对话忙时也不 submit、不停任务', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 252_000 })
   const w = world(on)
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await clock.advance(2_000)
   expect(w.prompts).toHaveLength(0)
+  expect(w.toasts).toHaveLength(0)
 
   await clock.set(T0 + 905_000)
-  expect(w.prompts).toHaveLength(1)
-  expect(w.prompts[0]).toContain('Codex 任务「性能」（review-api，gpt-6.1-sol high）已运行 15m')
-  expect(w.prompts[0]).toContain('不要自动停止')
-  expect(w.prompts[0]).toContain(`${ROOT}/r-1/logs/性能.jsonl`)
+  expect(w.prompts).toHaveLength(0)
+  expect(w.toasts).toHaveLength(1)
+  expect(w.toasts[0]).toContain('Codex 任务「性能」（review-api，gpt-6.1-sol high）已运行 15m')
 
   await clock.advance(60_000)
-  expect(w.prompts).toHaveLength(1)
+  expect(w.toasts).toHaveLength(1)
+  expect(w.prompts).toHaveLength(0)
   expect(controlWrites(w)).toHaveLength(0)
   expect(w.killed).toHaveLength(0)
 
-  // 主对话在忙时不提醒；空闲后按当时的时长提醒
+  // toast 不唤醒主对话，无需等当前轮结束。
   await $.turn.start({ text: '', turnId: 't-1' })
   await clock.set(T0 + 1_805_000)
-  expect(w.prompts).toHaveLength(1)
+  expect(w.toasts).toHaveLength(3)
+  expect(w.prompts).toHaveLength(0)
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't-1', reason: 'answer' } as never)
   await clock.advance(2_000)
-  // 空闲后一次补上：性能满 30 分钟，单发任务（第 600 秒开始）满 15 分钟
-  expect(w.prompts).toHaveLength(3)
-  expect(w.prompts.some(p => p.includes('「性能」') && p.includes('已运行 30m'))).toBe(true)
-  expect(w.prompts.some(p => p.includes('「单发测试」') && p.includes('已运行 20m'))).toBe(true)
+  // 同一阈值不重复：性能满 30 分钟，单发任务（第 600 秒开始）满 15 分钟。
+  expect(w.toasts).toHaveLength(3)
+  expect(w.prompts).toHaveLength(0)
+  expect(w.toasts.some(p => p.includes('「性能」') && p.includes('已运行 30m'))).toBe(true)
+  expect(w.toasts.some(p => p.includes('「单发测试」') && p.includes('已运行 15m'))).toBe(true)
 
-  // 进程已经不在：记为已退出，不再提醒
+  // 进程已经不在：不再发时长 toast，各运行只发失联提醒。
   w.alive = []
   await clock.set(T0 + 2_710_000)
-  expect(w.prompts).toHaveLength(3)
+  expect(w.toasts).toHaveLength(3)
+  expect(w.prompts).toHaveLength(2)
+})
+
+test('环境阈值控制 toast，运行记录的 alertAfter 优先；同一 flow 多个任务分别去重', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 700_000 })
+  const w = world(on, { HOME: '/home/me', CODEX_FLOW_ALERT_AFTER: '100' })
+  w.dirs = ['r-1', 's-1']
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({
+    ...flowState, alertAfter: 800,
+    tasks: flowState.tasks.map(t => t.label === '安全' ? { ...t, status: 'running', endedAt: null } : t),
+  })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  expect(w.toasts).toHaveLength(1)
+  expect(w.toasts[0]).toContain('「单发测试」')
+  await clock.advance(10_000)
+  expect(w.toasts).toHaveLength(1)
+  await clock.set(T0 + 802_000)
+  expect(w.toasts).toHaveLength(4)
+  expect(w.toasts.filter(p => p.includes('review-api'))).toHaveLength(2)
+  await clock.advance(10_000)
+  expect(w.toasts).toHaveLength(4)
+  expect(w.prompts).toHaveLength(0)
+})
+
+test('lost 时同一运行只 submit 一条，合并仍标 running 的任务和日志，恢复后再次 lost 也不重复', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({
+    ...flowState,
+    tasks: flowState.tasks.map(t => t.label === '汇总复核' ? { ...t, status: 'running', startedAt: iso(200), log: 'logs/汇总复核.jsonl' } : t),
+  })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  expect(w.prompts).toHaveLength(0)
+  w.alive = []
+  await clock.advance(2_000)
+  expect(w.prompts).toHaveLength(1)
+  const text = w.prompts[0]
+  expect(text).toContain('运行「review-api」（runId：r-1）')
+  expect(text).toContain(`运行目录：${ROOT}/r-1`)
+  expect(text).toContain('执行器进程已退出但状态仍是 running')
+  expect(text).toContain(`「性能」：${ROOT}/r-1/logs/性能.jsonl`)
+  expect(text).toContain(`「汇总复核」：${ROOT}/r-1/logs/汇总复核.jsonl`)
+  expect(text).not.toContain('「安全」')
+  expect(text).toContain('请主 agent 读日志后向用户汇报，不要自动重跑')
+  await clock.advance(40_000)
+  expect(w.prompts).toHaveLength(1)
+  w.alive = [4242]
+  await clock.advance(2_000)
+  w.alive = []
+  await clock.advance(2_000)
+  expect(w.prompts).toHaveLength(1)
+  expect(controlWrites(w)).toHaveLength(0)
+  expect(w.killed).toHaveLength(0)
+  expect(w.toasts).toHaveLength(0)
+})
+
+test('lost 提醒等主对话空闲，按空闲时的状态发送；已完成的运行不补发', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1', 's-1']
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '', turnId: 'busy' })
+  w.alive = []
+  await clock.advance(40_000)
+  expect(w.prompts).toHaveLength(0)
+  w.files[`${ROOT}/s-1/state.json`] = JSON.stringify({ ...singleState, status: 'completed', endedAt: iso(290) })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 'busy', reason: 'answer' } as never)
+  await clock.advance(2_000)
+  expect(w.prompts).toHaveLength(1)
+  expect(w.prompts[0]).toContain('runId：r-1')
+  expect(w.prompts[0]).not.toContain('runId：s-1')
+  await clock.advance(4_000)
+  expect(w.prompts).toHaveLength(1)
+})
+
+test('失联去重键不被后续超过 200 条时长提醒淘汰', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1', 's-1']
+  w.alive = [5151]
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  expect(w.prompts).toHaveLength(1)
+  expect(w.toasts).toHaveLength(0)
+  w.files[`${ROOT}/s-1/state.json`] = JSON.stringify({
+    ...singleState,
+    tasks: Array.from({ length: 201 }, (_, i) => ({ ...singleState.tasks[0], label: `task-${i}`, startedAt: iso(0) })),
+    alertAfter: 100,
+  })
+  await clock.advance(2_000)
+  expect(w.toasts).toHaveLength(201)
+  w.files[`${ROOT}/s-1/state.json`] = JSON.stringify({ ...singleState, status: 'completed', endedAt: iso(256) })
+  await clock.advance(2_000)
+  expect(w.prompts).toHaveLength(1)
+})
+
+test('历史显示仍限十条，超出面板历史范围的 lost 运行也只提醒一次', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  for (let i = 0; i < 12; i++) {
+    const id = `s-history-${i}`
+    w.dirs.push(id)
+    w.files[`${ROOT}/${id}/state.json`] = JSON.stringify({ ...singleState, runId: id, status: 'completed', startedAt: iso(100 + i), endedAt: iso(200) })
+  }
+  w.alive = []
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  // 没有运行中的任务时不会自动打开；手动打开才将最新快照写入面板记录。
+  await $.command.run(FLOW_CMD)
+  expect(panel(w).snapshot!.runs).toHaveLength(10)
+  expect(panel(w).snapshot!.runs.some(r => r.runId === 'r-1')).toBe(false)
+  expect(w.prompts).toHaveLength(1)
+  expect(w.prompts[0]).toContain('runId：r-1')
+  await clock.advance(4_000)
+  expect(w.prompts).toHaveLength(1)
 })
 
 test('最后一个任务结束不足 30 秒不收起（包括毫秒边界，主对话一直忙）', async ($, on) => {
@@ -552,7 +674,7 @@ test('runs 不存在是尚未派任务，存在但列不出保留面板，恢复
   await ui.unmount()
 })
 
-test('保留最新十条之外的所有在跑运行，历史只取十条，不误收起且仍发 15 分钟提醒', async ($, on) => {
+test('保留最新十条之外的所有在跑运行，历史只取十条，不误收起且仍发 15 分钟 toast', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 905_000 })
   const w = world(on)
   w.dirs = ['r-1', 's-1']
@@ -568,8 +690,9 @@ test('保留最新十条之外的所有在跑运行，历史只取十条，不�
   expect(snapshot.runs.filter(r => r.status === 'running')).toHaveLength(2)
   expect(snapshot.runs.some(r => r.runId === 'r-1')).toBe(true)
   expect(snapshot.runs.some(r => r.runId === 's-history-0' || r.runId === 's-history-1')).toBe(false)
-  expect(w.prompts).toHaveLength(1)
-  expect(w.prompts[0]).toContain('「性能」')
+  expect(w.prompts).toHaveLength(0)
+  expect(w.toasts).toHaveLength(1)
+  expect(w.toasts[0]).toContain('「性能」')
   const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
   await clock.advance(32_000)
   expect(panel(w).shown).toBe(true)

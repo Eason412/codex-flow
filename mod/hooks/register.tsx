@@ -112,6 +112,7 @@ async function readRuns($: Engine) {
   const root = await runsRoot($)
   const session = await $.session.id()
   const now = await $.clock.now()
+  let reminderRuns: FlowRun[] = []
   const list = await readRunList({
     root, session, now, otherSession, goodStates, reportedErrors, lostSince,
     list: () => $.fs.list(root),
@@ -120,6 +121,7 @@ async function readRuns($: Engine) {
     stateMtime: dir => stateMtime($, dir),
     alivePids: pids => alivePids($, pids),
     current: () => read($, runs),
+    collect: all => { reminderRuns = all },
     record: (list, errors, newErrors) => {
       snapshot = {
         at: new Date(now).toISOString(), complete: errors.length === 0, errors,
@@ -136,7 +138,7 @@ async function readRuns($: Engine) {
     await update($, kept, old => (ids.every(id => old.includes(id)) ? old : [...old, ...ids.filter(id => !old.includes(id))].slice(-50)))
   }
   await syncWindows(actionContext($))
-  await remind($, list)
+  await remind($, reminderRuns)
   // 结果页打开时任务刚好出了结果，补读一次
   const at = await read($, nav)
   if (at.label && at.text === null) {
@@ -185,12 +187,28 @@ async function setShown($: Engine, value: boolean, by: PanelRecord['by'], isAuto
   await changePanel($, () => applyShown(actionContext($), value, by, isAuto))
 }
 
-// 任务每跑满一个阈值提醒一次（15m、30m…），只提醒，不停任务；主对话在忙时等它空闲后再按当时的状态提醒
+// 时长每满一个阈值只弹 toast；失联运行合并任务后提交一次，主对话忙时等空闲再检查。
 async function remind($: Engine, list: FlowRun[]) {
-  if (await read($, working)) return
+  const busy = await read($, working)
   const done = await read($, reminded)
   const fresh: string[] = []
   for (const run of list) {
+    if (run.status === 'lost') {
+      const key = `${run.runId}:lost`
+      if (busy || done.includes(key)) continue
+      fresh.push(key)
+      // state-reader 把快照中仍为 running 的任务转为 lost，其他任务状态保持原样。
+      const tasks = run.tasks.filter(task => task.status === 'lost').map(task =>
+        `「${task.label}」：${task.log ? `${run.dir}/${task.log}` : '未记录日志路径'}`,
+      )
+      void $.prompt.submit({
+        text:
+          `[codex-flow] 运行「${run.name}」（runId：${run.runId}）的执行器进程已退出但状态仍是 running。` +
+          `运行目录：${run.dir}\n当时仍标为 running 的任务及日志：\n${tasks.join('\n') || '无'}\n` +
+          '请主 agent 读日志后向用户汇报，不要自动重跑。',
+      })
+      continue
+    }
     if (run.status !== 'running') continue
     const after = run.alertAfter ?? (Number(await $.env.get('CODEX_FLOW_ALERT_AFTER')) || DEFAULT_ALERT_AFTER)
     for (const task of run.tasks) {
@@ -199,15 +217,14 @@ async function remind($: Engine, list: FlowRun[]) {
       const key = `${run.runId}:${task.label}:${n}`
       if (n < 1 || done.includes(key)) continue
       fresh.push(key)
-      const log = task.log ? `${run.dir}/${task.log}` : run.dir
-      void $.prompt.submit({
-        text:
-          `[codex-flow] Codex 任务「${task.label}」（${run.name}，${task.model} ${task.effort}）已运行 ${formatDuration(task.seconds)}。` +
-          `请读日志检查进展并向用户汇报；不要自动停止它。日志：${log}  运行目录：${run.dir}`,
-      })
+      $.ui.toast(`Codex 任务「${task.label}」（${run.name}，${task.model} ${task.effort}）已运行 ${formatDuration(task.seconds)}。`)
     }
   }
-  if (fresh.length) await update($, reminded, old => [...old, ...fresh].slice(-200))
+  if (fresh.length) await update($, reminded, old => {
+    const all = [...old, ...fresh]
+    // 时长提醒只保留最近 200 条；失联键不淘汰，保证每个运行只进对话一次。
+    return [...all.filter(key => key.endsWith(':lost')), ...all.filter(key => !key.endsWith(':lost')).slice(-200)]
+  })
 }
 
 async function stopTask($: Engine, run: FlowRun, task: FlowTask) {
