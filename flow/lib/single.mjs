@@ -1,7 +1,7 @@
 // run.sh 的单发登记、结束报告与最终回复排版；登记失败时仍按原参数补登。
 import fs from "node:fs";
 import path from "node:path";
-import { briefOf, checkModelEffort, HOME, nowIso, pruneOldRuns, readJson, serviceTierOf, statePath, writeJson } from "./state.mjs";
+import { briefOf, checkModelEffort, HOME, nowIso, pruneOldRuns, readJson, serviceTierOf, statePath, writeJson, writeText } from "./state.mjs";
 import { cleanArchives } from "./archive.mjs";
 import { ALERT_AFTER, die, SESSION } from "./runtime.mjs";
 import { jsonlObjects, singleContext } from "./rollout.mjs";
@@ -16,6 +16,7 @@ export function cmdSingleStart({ flags }) {
   const task = fs.readFileSync(flags["task-file"], "utf8");
   try { checkModelEffort(flags.model, flags.effort, flags.label || briefOf(task, 16)); } catch (error) { die(error.message); }
   fs.mkdirSync(path.join(flags.dir, "control"), { recursive: true });
+  fs.rmSync(path.join(flags.dir, "summary.txt"), { force: true });
   writeJson(statePath(flags.dir), singleState(flags, task, nowIso()));
 }
 
@@ -51,7 +52,6 @@ function reportSingle(dir, code, state, events) {
   task.actualModel = context?.model ?? null;
   task.actualEffort = context?.effort ?? null;
   task.actualServiceTier = tier;
-  writeJson(statePath(dir), state);
   process.stdout.write(`[codex] thread: ${task.threadId || "未知"}\n`);
   if (context) {
     const tierText = tier ? ` service_tier=${tier}` : "";
@@ -139,13 +139,16 @@ function endSingle(dir, code, flags = {}) {
   state.phases[0].status = status;
   state.status = status;
   state.endedAt = at;
-  writeJson(file, state);
   try {
     if (eventsError) throw eventsError;
     reportSingle(dir, code, state, events);
   } finally {
-    appendHistory(dir, state);
-    fs.writeFileSync(path.join(dir, "summary.txt"), renderSummary(dir, state));
+    try {
+      writeText(path.join(dir, "summary.txt"), renderSummary(dir, state));
+    } finally {
+      writeJson(file, state);
+      appendHistory(dir, state);
+    }
   }
 }
 

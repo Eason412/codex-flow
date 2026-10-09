@@ -112,12 +112,14 @@ export async function checkTask(dir, task, cwd, stopFile) {
 export function settleChecks(task, failure) {
   // 整个 flow 已在停止：onStop 已把运行中的任务记为已停止，验收通过、失败或被强制结束都不改它
   if (stopping) {
+    if (task.result) task.recheck = true;
     task.checkFailed = false;
     task.status = "cancelled";
     return;
   }
   task.checkFailed = !!failure && failure !== "stop";
   if (failure === "stop") {
+    if (task.result) task.recheck = true;
     task.status = "cancelled";
     task.error = "已按要求停止（验收中）";
   } else if (failure) {
@@ -158,7 +160,7 @@ export async function recheckTask(dir, task, cwd) {
     settleChecks(task, await checkTask(dir, task, iso?.wtCwd ?? cwd, stopFile));
   }
   if (iso) closeWorktree(task, iso);
-  delete task.recheck;
+  if (task.status !== "cancelled") delete task.recheck;
   task.endedAt = nowIso();
   save();
 }

@@ -2,7 +2,7 @@
 // 调度时写入范围重叠的任务按租约排队；续跑时按工作区快照判断复用的结果是否过期
 import fs from "node:fs";
 import path from "node:path";
-import { briefOf, isAlive, newRunId, nowIso, promptHash, pruneOldRuns, readJson, runDir, statePath, serviceTierOf, writeJson } from "./state.mjs";
+import { briefOf, busy, newRunId, nowIso, promptHash, pruneOldRuns, readJson, runDir, statePath, serviceTierOf, writeJson, writeText } from "./state.mjs";
 import { ALERT_AFTER, checkProcs, current, die, fileSafe, markStopping, save, servers, SESSION, setCurrent, stopping } from "./runtime.mjs";
 import { literal, loadPlan, loadSchema, phaseNotes, renderPrompt, validatePlan, withContract } from "./plan.mjs";
 import { inScope, realPath } from "./scope.mjs";
@@ -12,7 +12,7 @@ import { changedSources, changesSince, flowCwds, snapshotWorkspace, staleFiles }
 import { measureInput, meterReport } from "./meter.mjs";
 import { recordCollisions } from "./collisions.mjs";
 import { runTask } from "./task.mjs";
-import { cleanRunArchives, closeActive, isolationFields, isolationNotes } from "./isolation.mjs";
+import { cleanRunArchives, closeActive, isolationFields, isolationNotes, rememberWorktree } from "./isolation.mjs";
 import { archiveLeftovers } from "./threads.mjs";
 import { overallStatus, phaseStatus, renderSummary } from "./summary.mjs";
 import { appendHistory } from "./history.mjs";
@@ -24,6 +24,7 @@ export async function onStop(signal) {
   for (const child of checkProcs) killGroup(child, "SIGKILL");
   const { state } = current;
   const at = nowIso();
+  const interrupted = state.tasks.some((t) => ["running", "pending"].includes(t.status));
   for (const task of state.tasks) {
     if (task.status === "running" || task.status === "pending") {
       task.error = task.status === "running" ? `收到 ${signal}，已停止` : "未开始";
@@ -31,8 +32,11 @@ export async function onStop(signal) {
       task.endedAt = task.startedAt ? at : null;
     }
   }
-  for (const phase of state.phases) if (phase.status === "running" || phase.status === "pending") phase.status = "cancelled";
-  state.status = "cancelled";
+  for (const phase of state.phases) {
+    if (!interrupted) phase.status = phaseStatus(state.tasks.filter((t) => t.phase === phase.title));
+    else if (phase.status === "running" || phase.status === "pending") phase.status = "cancelled";
+  }
+  state.status = interrupted ? "cancelled" : overallStatus(state.tasks);
   state.endedAt = at;
   try {
     state.workspace = snapshotWorkspace(flowCwds(state.cwd, state.tasks));
@@ -50,7 +54,7 @@ export async function onStop(signal) {
   // Codex 都停了再收尾隔离任务（存成果、删目录），汇总写的是收尾后的实际去留
   closeActive();
   const summary = renderSummary(current.dir, state);
-  fs.writeFileSync(path.join(current.dir, "summary.txt"), summary);
+  writeText(path.join(current.dir, "summary.txt"), summary);
   process.stdout.write(summary);
   appendHistory(current.dir, state);
   process.exit(143);
@@ -66,7 +70,7 @@ function prepareFlow(planFile, resumeId, rerun) {
     dir = runDir(resumeId);
     previous = readJson(statePath(dir));
     if (!previous) die(`找不到运行记录: ${resumeId}`);
-    if (previous.status === "running" && isAlive(previous.pid)) die(`${resumeId} 还在运行`);
+    if (busy(dir, previous)) die(`${resumeId} 还在运行`);
     if (planFile) plan = loadPlan(planFile);
     else {
       // 运行目录里存的是展开后的计划，不再展开一次；旧计划的 cwd 可能缺失或是相对路径，用上次实际的工作目录
@@ -86,6 +90,7 @@ function prepareFlow(planFile, resumeId, rerun) {
   fs.mkdirSync(path.join(dir, "control"), { recursive: true });
   for (const name of fs.readdirSync(path.join(dir, "control"))) fs.rmSync(path.join(dir, "control", name), { force: true });
   writeJson(path.join(dir, "plan.json"), plan);
+  fs.rmSync(path.join(dir, "summary.txt"), { force: true });
 
   return { dir, previous, plan, deps, notes };
 }
@@ -130,7 +135,7 @@ function populateFlowTasks(dir, state, previous, planTasks, deps, rerun, notes) 
     if (!reusable.has(label)) {
       const t = planTasks.get(label);
       const old = previous?.tasks?.find((o) => o.label === label);
-      reusable.set(label, !!(old && (old.status === "completed" || old.checkFailed) && old.hash === promptHash(t) && old.result && fs.existsSync(path.join(dir, old.result))
+      reusable.set(label, !!(old && (old.status === "completed" || old.checkFailed || old.recheck) && old.hash === promptHash(t) && old.result && fs.existsSync(path.join(dir, old.result))
         && (old.cwd ?? previous.cwd) === (t.cwd ?? cwd) && (!old.needs || sameList(old.needs, deps.get(label))) && (old.isolation ?? null) === (t.isolation ?? null))
         && !rerun.has(label) && !(readOnly(t) && staleFor(label).length)
         && deps.get(label).every(canReuse));
@@ -152,7 +157,7 @@ function populateFlowTasks(dir, state, previous, planTasks, deps, rerun, notes) 
     const stale = [...new Set([...(old.stale ?? []), ...staleFor(t.label)])].sort();
     if (stale.length) entry.stale = stale;
     else delete entry.stale;
-    if (old.checkFailed || !sameJson(old.checks ?? [], t.checks ?? [])) Object.assign(entry, { status: "pending", recheck: true });
+    if (old.checkFailed || old.recheck || !sameJson(old.checks ?? [], t.checks ?? [])) Object.assign(entry, { status: "pending", recheck: true });
     if (old.scope && !sameJson(old.writes, t.writes)) entry.scope = rescope(old.scope, t);
     return entry;
   };
@@ -167,23 +172,26 @@ function populateFlowTasks(dir, state, previous, planTasks, deps, rerun, notes) 
       : { label, phase: t.phase, model: t.model, effort: t.effort, ...tierOf(t.model), brief: t.brief || briefOf(literal(t.prompt)), hash: promptHash(t), status: "pending",
           needs: deps.get(label), ...contract, ...(t.schema ? { schema: t.schema } : {}), ...(t.cwd && t.cwd !== cwd ? { cwd: t.cwd } : {}), ...staleRerun });
   }
-  carryLeftovers(state, previous);
+  carryLeftovers(state, previous, notes);
   if (changes?.unknown.length && state.tasks.some((t) => t.reused)) {
     notes.push(`无法判断复用的结果是否过期（不在 git 里，或上次运行没有记下工作区快照）：${changes.unknown.join("、")}`);
   }
 }
 
-// 续跑时没被复用的旧任务（重跑、改了隔离方式或从计划里删掉），它的成果分支和没归档成的对话不能跟着记录一起丢：
+// 续跑时没被复用的旧任务（重跑、改了隔离方式或从计划里删掉），它的分支、worktree 和没归档成的对话不能跟着记录一起丢：
 // 记进 state.leftovers，clean、过期清理和补归档照样管，重做同一任务时据此认出可以换掉的旧分支
-function carryLeftovers(state, previous) {
+function carryLeftovers(state, previous, notes) {
   if (!previous) return;
-  const left = { branches: [...(previous.leftovers?.branches ?? [])], threads: [...(previous.leftovers?.threads ?? [])] };
+  const left = { branches: [...(previous.leftovers?.branches ?? [])], threads: [...(previous.leftovers?.threads ?? [])], worktrees: [] };
+  state.leftovers = left;
+  for (const wt of previous.leftovers?.worktrees ?? []) rememberWorktree(state, wt, notes);
   for (const old of previous.tasks ?? []) {
     if (state.tasks.some((t) => t.label === old.label && t.reused)) continue;
     if (old.branch?.tip) left.branches.push({ repo: old.branch.repo, name: old.branch.name, tip: old.branch.tip });
+    if (old.worktree) rememberWorktree(state, old.worktree, notes);
     if (old.threadId && !old.threadArchived) left.threads.push(old.threadId);
   }
-  if (left.branches.length || left.threads.length) state.leftovers = left;
+  if (!left.branches.length && !left.threads.length && !left.worktrees.length) delete state.leftovers;
 }
 
 // 拼出发给 Codex 的任务说明，并按指令、资料、上游结果、约束、schema 计量
@@ -240,8 +248,8 @@ function scheduleTasks(dir, state, planTasks, deps) {
           const t = planTasks.get(task.label);
           const taskCwd = t.cwd ?? cwd;
           // 写入范围和运行中的任务重叠就先等着，前者结束时会再走到这里
-          const isolated = !task.recheck && t.isolation === "worktree";
-          const lease = task.recheck || isolated ? null : leaseOf(t.writes, taskCwd);
+          const isolated = t.isolation === "worktree" && (!task.recheck || task.merge?.state !== "applied");
+          const lease = isolated ? null : leaseOf(t.writes, taskCwd);
           const blockers = leases.blockers(lease, task.label);
           if (blockers.length || (isolated && worktrees >= MAX_WORKTREES)) {
             task.waiting = blockers.length ? blockers : ["worktree 上限"];
@@ -307,9 +315,9 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   } catch {
     // 快照失败只影响下次续跑的过期判断
   }
-  save();
   const summary = renderSummary(dir, state);
-  fs.writeFileSync(path.join(dir, "summary.txt"), summary);
+  writeText(path.join(dir, "summary.txt"), summary);
+  save();
   process.stdout.write(summary);
   appendHistory(dir, state);
   try {

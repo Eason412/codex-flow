@@ -53,11 +53,15 @@ export function newRunId(prefix = "r") {
 export const runDir = (runId) => path.join(RUNS, runId);
 export const statePath = (dir) => path.join(dir, "state.json");
 
-// 先写临时文件再改名，读的一方不会读到半截 JSON
-export function writeJson(file, value) {
+// 先写临时文件再改名，读的一方不会读到半截状态或汇总。
+export function writeText(file, text) {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.writeFileSync(tmp, text);
   fs.renameSync(tmp, file);
+}
+
+export function writeJson(file, value) {
+  writeText(file, JSON.stringify(value, null, 2));
 }
 
 export function readJson(file) {
@@ -76,6 +80,16 @@ export function isAlive(pid) {
   } catch (error) {
     return error.code === "EPERM";
   }
+}
+
+// 还在运行，或已记下结束、进程还在写本轮汇总（停止收尾最多十几秒）。结束超过一分钟、本轮汇总已写出的，
+// 进程号即使还活着也是被系统复用给了别的程序，不算
+export function busy(dir, state) {
+  if (!isAlive(state.pid)) return false;
+  if (state.status === "running") return true;
+  const summary = fs.statSync(path.join(dir, "summary.txt"), { throwIfNoEntry: false });
+  if (summary && summary.mtimeMs >= Date.parse(state.startedAt)) return false;
+  return Date.now() - Date.parse(state.endedAt ?? 0) < 60_000;
 }
 
 // 状态写着 running 但进程已经不在：被强杀或崩溃
@@ -140,6 +154,7 @@ export const keepDaysOf = (state) => (hasArchive(state) ? ARCHIVE_DAYS : 7);
 // 运行记录里还有隔离任务的成果分支（含续跑时换下来的旧成果）或保留的 worktree（V0.3 的记录：没合回的私有引用）
 export const hasArchive = (state) =>
   !!state?.leftovers?.branches?.length
+  || !!state?.leftovers?.worktrees?.length
   || (state?.tasks ?? []).some((t) => t.isolation === "worktree" && (t.worktree || t.branch?.tip || (t.merge?.result && t.merge.state !== "applied")));
 
 // 删掉 7 天前结束的记录、开始超过 7 天且进程已不在的记录，以及超过 7 天未登记的目录。

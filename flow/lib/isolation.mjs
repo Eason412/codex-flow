@@ -4,7 +4,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HOME, isAlive, readJson, runDir, statePath, writeJson } from "./state.mjs";
+import { randomUUID } from "node:crypto";
+import { HOME, busy, readJson, runDir, statePath, writeJson } from "./state.mjs";
 import { current, die, save } from "./runtime.mjs";
 import { changedBetween, contentTree, gitRoot, viaLink } from "./workspace.mjs";
 import { inScope, realPath } from "./scope.mjs";
@@ -83,9 +84,26 @@ function enter(iso, tree) {
   iso.task.worktree = { path: iso.wt, repo: iso.root, links: iso.links };
 }
 
+// 旧目录可能是尚未归档的唯一成果，续跑不覆盖它；记录路径供汇总和清理使用。
+export function rememberWorktree(state, wt, notes = (state.notes ??= [])) {
+  const left = (state.leftovers ??= { branches: [], threads: [] });
+  const worktrees = (left.worktrees ??= []);
+  if (!worktrees.some((w) => w.path === wt.path)) worktrees.push(wt);
+  const note = `上次的 worktree 保留在 ${wt.path}；确认成果后可用 clean ${state.runId} 清理`;
+  if (!notes.includes(note)) notes.push(note);
+}
+
 function prepare(dir, task, cwd, root) {
   const runId = path.basename(dir);
-  return { task, runId, root, cwd, wtPath: path.join(WORKTREES, runId, nameOf(task.label)), links: [], archived: false };
+  let wtPath = path.join(WORKTREES, runId, nameOf(task.label));
+  if (task.worktree && fs.existsSync(task.worktree.path)) rememberWorktree(current.state, task.worktree);
+  if (fs.lstatSync(wtPath, { throwIfNoEntry: false })) {
+    rememberWorktree(current.state, { path: wtPath, repo: root, links: task.worktree?.path === wtPath ? task.worktree.links : [] });
+    wtPath += `-${randomUUID()}`;
+  }
+  // 先持久化旧目录的位置；即使建立新 worktree 期间崩溃也能找到它。
+  save();
+  return { task, runId, root, cwd, wtPath, links: [], archived: false };
 }
 
 // 同一任务重做前：同名分支只在仍停在本运行记下的旧成果提交（state.leftovers）上时删掉；
@@ -108,7 +126,6 @@ export function openWorktree(dir, task, cwd) {
   const iso = prepare(dir, task, cwd, root);
   const name = branchOf(iso.runId, task.label);
   if (git(root, ["check-ref-format", "--branch", name]).status !== 0) throw new Error(`任务名换成分支名 ${name} 不合法`);
-  removeWorktree(root, iso.wtPath);
   dropOldBranch(iso, name);
   iso.base = contentTree(root);
   if (!iso.base) throw new Error("记不下主工作区快照");
@@ -130,7 +147,6 @@ export function reopenWorktree(dir, task, cwd) {
   // 有改动却没有成果提交（被 clean 删了）时不能退回按基准验收
   Object.assign(iso, { base: tree(b.base), end: b.files?.length && !b.tip ? "" : tree(b.tip ?? b.base), archived: true });
   if (!iso.base || !iso.end) throw new Error(`隔离任务上次的成果已不在，无法只重跑验收；要从头重做加 --rerun ${task.label}`);
-  removeWorktree(iso.root, iso.wtPath, task.worktree?.links);
   enter(iso, iso.end);
   iso.changed = changedFiles(iso);
   if (task.branch && !task.branch.files?.length) task.branch.files = iso.changed.map((rel) => shown(iso, rel)).sort();
@@ -262,14 +278,17 @@ export function cmdClean({ positionals }) {
   const dir = runDir(runId);
   const state = readJson(statePath(dir));
   if (!state) die(`找不到运行记录: ${runId}`);
-  if (isAlive(state.pid) && state.status === "running") die(`${runId} 还在运行`, 1);
+  if (busy(dir, state)) die(`${runId} 还在运行`, 1);
   const { branches, kept, worktrees } = cleanArchives(state, WORKTREES);
   for (const t of state.tasks ?? []) {
     delete t.worktree;
     if (t.branch && !kept.includes(t.branch.name)) delete t.branch.tip;
     delete t.merge;
   }
-  if (state.leftovers) state.leftovers.branches = state.leftovers.branches.filter((b) => kept.includes(b.name));
+  if (state.leftovers) {
+    state.leftovers.branches = (state.leftovers.branches ?? []).filter((b) => kept.includes(b.name));
+    state.leftovers.worktrees = [];
+  }
   writeJson(statePath(dir), state);
   const note = kept.length ? `；这些分支之后有新提交，没删：${kept.join("、")}` : "";
   process.stdout.write(`[codex-flow] 已清理 ${runId}：删除 ${branches} 个分支、${worktrees} 个 worktree${note}\n`);

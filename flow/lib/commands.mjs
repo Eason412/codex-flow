@@ -27,8 +27,8 @@ export function cmdCancel({ positionals }) {
   const [runId, label] = positionals;
   if (!runId) die("用法: cancel <runId> [任务名]");
   const { dir, state } = findRun(runId);
+  if (state.status !== "running" || !isAlive(state.pid)) die(`${runId} 已经不在运行`, 1);
   if (state.kind === "single") {
-    if (!isAlive(state.pid)) die(`${runId} 已经不在运行`, 1);
     fs.mkdirSync(path.join(dir, "control"), { recursive: true });
     fs.writeFileSync(path.join(dir, "control", "stop"), nowIso());
     spawnSync("pkill", ["-TERM", "-P", String(state.pid)]);
@@ -41,7 +41,6 @@ export function cmdCancel({ positionals }) {
     process.stdout.write(`[codex-flow] 已请求停止「${label}」\n`);
     return;
   }
-  if (!isAlive(state.pid)) die(`${runId} 已经不在运行`, 1);
   process.kill(state.pid, "SIGTERM");
   process.stdout.write(`[codex-flow] 已请求停止 ${runId}\n`);
 }
@@ -51,6 +50,8 @@ export function cmdSteer({ positionals }) {
   const text = rest.join(" ").trim();
   if (!runId || !label || !text) die('用法: steer <runId> <任务名> "<补充指示>"');
   const { dir, state } = findRun(runId);
+  if (state.kind === "single") die("单发运行不支持 steer，请用 run.sh -r <threadId> 续接", 1);
+  if (state.status !== "running" || !isAlive(state.pid)) die(`${runId} 已经不在运行`, 1);
   const task = state.tasks.find((t) => t.label === label);
   if (!task) die(`没有名为「${label}」的任务`);
   if (task.status !== "running") die(`任务「${label}」不在运行（${task.status}）`, 1);
@@ -69,9 +70,12 @@ export async function cmdWatch({ flags, positionals }) {
     const status = effectiveStatus(state);
     if (status !== "running") {
       const summary = path.join(dir, "summary.txt");
-      if (fs.existsSync(summary)) process.stdout.write(fs.readFileSync(summary, "utf8"));
-      else process.stdout.write(`[codex-flow] ${state.name} 已结束：${WORD[status] ?? status}，汇总见 ${summary}\n`);
-      return;
+      const fresh = fs.statSync(summary, { throwIfNoEntry: false })?.mtimeMs >= Date.parse(state.startedAt);
+      if (fresh) { process.stdout.write(fs.readFileSync(summary, "utf8")); return; }
+      if (!isAlive(state.pid)) {
+        process.stdout.write(`[codex-flow] ${state.name} 已结束：${WORD[status] ?? status}，汇总见 ${summary}\n`);
+        return;
+      }
     }
     const slow = alertAfter === null ? null : state.tasks.find((t) => t.status === "running" && elapsedSeconds(t.startedAt) >= alertAfter);
     if (slow) {

@@ -8,24 +8,30 @@ import { die } from "./runtime.mjs";
 const historyPath = () => path.join(HOME, "history.jsonl");
 const warn = (error) => process.stderr.write(`[codex-flow] ⚠ history 写入失败: ${String(error.message).replace(/[\r\n]+/g, " ")}\n`);
 
-// 只读取 runId，单行损坏不妨碍其余记录；其他读取错误不能当作空历史。
-export function historyRunIds() {
+const roundKey = (runId, startedAt) => JSON.stringify([runId, startedAt ?? null]);
+
+// 按 runId 或每轮开始时间读取，单行损坏不妨碍其余记录；其他读取错误不能当作空历史。
+export function historyRunIds(byRound = false) {
   let text;
   try { text = fs.readFileSync(historyPath(), "utf8"); }
   catch (error) { if (error.code === "ENOENT") return new Set(); throw error; }
   const ids = new Set();
   for (const line of text.split("\n")) {
-    try { const record = JSON.parse(line); if (record.runId && record.type !== "verdict") ids.add(record.runId); } catch {}
+    try { const record = JSON.parse(line); if (record.runId && record.type !== "verdict") ids.add(byRound ? roundKey(record.runId, record.startedAt) : record.runId); } catch {}
   }
   return ids;
 }
 
 export function historyRecord(dir, state) {
+  // 崩溃后没有结束时间，用最后一次状态落盘的时间；不能把等待补录的几天算作运行耗时。
+  let lastActivity = null;
+  try { lastActivity = fs.statSync(statePath(dir)).mtime.toISOString(); } catch {}
   return {
     runId: state.runId ?? path.basename(dir), kind: state.kind ?? "flow", name: state.name ?? null,
     why: state.why ?? null, cwd: state.cwd ?? null, status: effectiveStatus(state), startedAt: state.startedAt ?? null,
     endedAt: state.endedAt ?? null, resumed: state.resumed ?? (state.kind === "single" ? state.tasks?.[0]?.resumed ?? null : null), recordedAt: nowIso(),
     tasks: (state.tasks ?? []).map((task) => {
+      const endedAt = task.endedAt ?? state.endedAt ?? lastActivity;
       let usage = null;
       try { usage = tokenBreakdown(task, task.startedAt ?? state.startedAt, task.endedAt ?? state.endedAt, state.kind); } catch {}
       let chars = task.report?.chars ?? null;
@@ -36,7 +42,7 @@ export function historyRecord(dir, state) {
         label: task.label ?? null, phase: task.phase ?? null, model: task.model ?? null, effort: task.effort ?? null, pick: task.pick ?? null,
         actualModel: task.actualModel ?? null, actualEffort: task.actualEffort ?? null,
         serviceTier: task.serviceTier ?? null, actualServiceTier: task.actualServiceTier ?? null,
-        status: task.status ?? null, seconds: task.startedAt ? elapsedSeconds(task.startedAt, task.endedAt ?? state.endedAt) : 0,
+        status: task.status ?? null, seconds: task.startedAt ? (endedAt ? elapsedSeconds(task.startedAt, endedAt) : null) : 0,
         tokens: task.tokens ?? null, ...(usage ? { tokenUsage: usage } : {}), schema: task.schema ?? null,
         checks: { passed: (task.checkResults ?? []).filter((c) => c.code === 0 && !c.reason).length, total: task.checks?.length ?? task.checkResults?.length ?? 0 },
         input: Object.fromEntries(Object.entries(task.input ?? {}).filter(([, v]) => Number.isFinite(v?.chars)).map(([k, v]) => [k, v.chars])),
@@ -64,20 +70,20 @@ export function appendHistory(dir, state) {
 // 删除前的兜底：无法确认已记录或无法写入就保留目录，不能为了清理丢掉唯一数据。
 export function ensureHistory(dir, state) {
   try {
-    if (historyRunIds().has(state.runId ?? path.basename(dir))) return true;
+    if (historyRunIds(true).has(roundKey(state.runId ?? path.basename(dir), state.startedAt))) return true;
   } catch (error) { warn(error); return false; }
   return appendHistory(dir, state);
 }
 
 export function cmdHistory() {
   let ids;
-  try { ids = historyRunIds(); } catch (error) { warn(error); return; }
+  try { ids = historyRunIds(true); } catch (error) { warn(error); return; }
   let added = 0, skipped = 0;
   for (const entry of fs.existsSync(RUNS) ? fs.readdirSync(RUNS, { withFileTypes: true }) : []) {
     if (!entry.isDirectory()) continue;
     const dir = path.join(RUNS, entry.name), state = readJson(statePath(dir));
-    if (!state || ids.has(state.runId ?? entry.name)) { skipped++; continue; }
-    if (appendHistory(dir, state)) { added++; ids.add(state.runId ?? entry.name); }
+    if (!state || ids.has(roundKey(state.runId ?? entry.name, state.startedAt))) { skipped++; continue; }
+    if (appendHistory(dir, state)) { added++; ids.add(roundKey(state.runId ?? entry.name, state.startedAt)); }
   }
   process.stdout.write(`[codex-flow] history 补录 ${added} 条，跳过 ${skipped} 条\n`);
 }

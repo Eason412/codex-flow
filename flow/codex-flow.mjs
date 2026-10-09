@@ -9,7 +9,7 @@
 //   codex-flow.mjs steer <runId> <任务名> "<补充指示>"   给运行中的任务插话
 //   codex-flow.mjs watch <runId> [--alert-after 秒]     等 flow/单发结束并打印汇总；显式阈值才提前提醒
 //   codex-flow.mjs verdict <runId> [任务名] <used|partial|unused> ["原因"]   验收后记下结果是否用上
-//   codex-flow.mjs history --backfill                 补录现有运行到 history.jsonl，已有 runId 跳过
+//   codex-flow.mjs history --backfill                 补录现有运行到 history.jsonl，已记录的轮次跳过
 //   flow schema: review / opinion / result / report，或 schema 文件路径
 //   run.sh -j report 回传结论和全文路径；-j review/opinion 回传全文；-r/-f 自动取消归档
 //   codex-flow.mjs stats <runId> [--json]               每个任务的任务说明组成、token 用量、回报大小和验收
@@ -73,7 +73,7 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
   steer <runId> <任务名> "<补充指示>"                 给运行中的任务插话
   watch <runId> [--alert-after 秒]                    默认等 flow/单发结束，打印 summary.txt 全文；显式阈值才提前提醒
   verdict <runId> [任务名] used|partial|unused ["原因"]  验收后记下结果是否用上（partial、unused 要写原因）
-  history --backfill                                补录现有目录到 history.jsonl，已有 runId 或无 state.json 的目录跳过
+  history --backfill                                补录现有目录到 history.jsonl，已记录的轮次或无 state.json 的目录跳过
   stats <runId> [--json]                             查看任务计量
   clean <runId>                                     清理隔离成果
 schema: review / opinion / result / report，或 schema 文件路径。
@@ -83,6 +83,7 @@ run.sh -j review/opinion 回传全文，其余回传至多三行结论和全文�
     case "run": {
       const usage = "用法: run <plan.json> [--resume <runId>] [--rerun <任务名>]";
       const { flags, positionals } = strict(parseArgs(rest, ["resume"], ["rerun"]), ["resume", "rerun"], 1, usage);
+      if (Object.hasOwn(flags, "resume") && !flags.resume?.trim()) die("--resume 后面要写 runId");
       if (!positionals[0] && !flags.resume) die(usage);
       if (flags.rerun?.some((label) => !label)) die("--rerun 后面要写任务名");
       fs.mkdirSync(RUNS, { recursive: true });
