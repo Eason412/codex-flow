@@ -107,7 +107,7 @@ function footer(ctx: ViewContext, view: VerticalView, pagers: { label: string; p
   // 几个任务的列表里没有单一的停止对象，进了某个任务再停
   if (view !== 'list' && run?.status === 'running' && (view !== 'detail' || runningTask(ctx)))
     buttons.push(<Button plain dimColor hotkey="x" key="stop" label="停止" onPress={() => callbacks.pressStop()} />)
-  if (ctx.canHide) buttons.push(<Button plain dimColor hotkey="q" key="hide" label="关闭" onPress={() => callbacks.pressHide()} />)
+  buttons.push(<Button plain dimColor hotkey="q" key="hide" label={ctx.hideLabel} onPress={() => callbacks.pressHide()} />)
   const pageNodes = pagers.flatMap(p => [...(p.label ? [text(ctx, p.label, DIM)] : []), ...pagerNodes(ctx, p.pager).nodes])
   if (!buttons.length && !pageNodes.length) return null
   return (

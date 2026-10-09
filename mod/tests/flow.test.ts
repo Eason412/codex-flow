@@ -250,8 +250,8 @@ test('终端：任务开始时面板自动出现在输入框上方：几个运�
     expect(await ui.find({ type: 'Button', key: 'back' })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'r:s-1' })).toBeDefined()
 
-    // 在跑时不能彻底关闭，面板保持显示
-    expect(await ui.find({ type: 'Button', key: 'hide' })).toBeUndefined()
+    // 在跑时也能收起：键写「收起」
+    expect((await ui.find({ type: 'Button', key: 'hide' }))?.props.label).toBe('收起')
     expect(panel(w).shown).toBe(true)
     await ui.unmount()
   }
@@ -259,7 +259,7 @@ test('终端：任务开始时面板自动出现在输入框上方：几个运�
   // 同一批任务继续显示；新任务开始也显示在左栏
   const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
   await clock.advance(2_000)
-  expect(await ui.find({ type: 'Button', key: 'hide' })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'hide' }))?.props.label).toBe('收起')
 
   // 新任务开始：更新面板
   w.dirs.push('s-2')
@@ -318,7 +318,19 @@ test('终端：任务开始时面板自动出现在输入框上方：几个运�
   await clock.advance(2_000)
   expectPanel(w, true, 'auto-open', clock.now())
   expect(await ui.find({ type: 'Button', key: 'r:s-3' })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'hide' })).toBeUndefined()
+  // 在跑时按收起：面板收起、提示 /flow，任务照常跑；同一轮不再弹出，新任务开始才自动打开
+  expect((await ui.find({ type: 'Button', key: 'hide' }))?.props.label).toBe('收起')
+  await ui.press({ key: 'hide' })
+  expectPanel(w, false, 'user-hide', clock.now())
+  expect(w.toasts.at(-1)).toBe('已收起，Codex 任务继续运行；输入 /flow 重新打开')
+  expect(w.killed.filter(k => k.includes('5353'))).toEqual([])
+  await clock.advance(4_000)
+  expect(panel(w).shown).toBe(false)
+  w.dirs.push('s-4')
+  w.alive.push(5454)
+  w.files[`${ROOT}/s-4/state.json`] = JSON.stringify({ ...singleState, runId: 's-4', name: '第四个', pid: 5454, startedAt: new Date(clock.now()).toISOString() })
+  await clock.advance(2_000)
+  expectPanel(w, true, 'auto-open', clock.now())
   await ui.unmount()
 })
 
@@ -332,7 +344,7 @@ test('只有一个 flow 在跑时直接进它的阶段栏，最外层没有返�
   expect(await ui.find({ type: 'Button', key: 'p:审查' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'r:r-1' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'back' })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', key: 'hide' })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'hide' }))?.props.label).toBe('收起')
   expect((await $.command.run(FLOW_CMD)).text).toBe('Codex 任务面板已经在输入框上方。如果那里只剩一行「▸ plugin panel hidden」，那是 Claude Code 自带的折叠：点一下那一行，或按 ctrl+x ctrl+a，就能展开。')
   expectPanel(w, true, 'command', clock.now())
   expect(panel(w).shown).toBe(true)
@@ -654,7 +666,7 @@ test('一个运行读取失败、JSON 截断或字段不全时沿用好状态，
     w.files[path] = invalid
     await clock.advance(4_000)
     expect(await ui.find({ type: 'Button', key: 'r:s-1', text: '单发测试' })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'hide' })).toBeUndefined()
+    expect((await ui.find({ type: 'Button', key: 'hide' }))?.props.label).toBe('收起')
   }
   expect(w.logs.map(log => JSON.parse(log.text)).filter(log => log.event === 'refresh-incomplete')).toHaveLength(3)
   w.files[path] = JSON.stringify({ ...singleState, name: '恢复读取' })
@@ -718,7 +730,7 @@ test('保留最新十条之外的所有在跑运行，历史只取十条，不�
   expect(await ui.find({ type: 'Button', key: 'r:r-1' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'r:s-1' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Codex · 2 个运行' })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'hide' })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'hide' }))?.props.label).toBe('收起')
   await ui.unmount()
 })
 
@@ -1563,10 +1575,10 @@ test('桌面端 flow 页：名字默认色加粗、右侧统计写总数与 toke
   expect(await ui.find({ type: 'Text', text: /^4m\d\ds$/ })).toBeDefined()
   expect(all.some(t => /⚡/.test(t))).toBe(false)
 
-  // 按钮在最下一行：停止统一写「停止」，没有返回；在跑时没有关闭
+  // 按钮在最下一行：停止统一写「停止」，没有返回；在跑时关闭键写「收起」
   expect((await ui.find({ type: 'Button', key: 'stop' }))?.props.label).toBe('停止')
   expect(await ui.find({ type: 'Button', key: 'back' })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', key: 'hide' })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'hide' }))?.props.label).toBe('收起')
   // 切到复核：只展开它，agent 换成汇总复核，等待是空心框；在阶段层停止仍停整个 flow
   await ui.press({ key: 'p:复核' })
   expect(await ui.find({ type: 'Button', key: 't:r-1:汇总复核' })).toBeDefined()

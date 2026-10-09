@@ -68,7 +68,7 @@ Parallel writes are handled as in Claude's Workflow: the orchestrator splits tas
 - **Colors and markers**: Flows are purple, single agents blue, and running items carry an animated marker; models that use Fast by default are marked with a yellow ⚡. The top border shows the name, status, token total and elapsed time, with tokens counted the same way as Claude Code's "↓ N tokens".
 - **Multiple tasks**: When a new task starts while another is open, the panel keeps the current view and the top border notes "另有 N 个任务" (N other tasks); `b` returns to the list to switch.
 - **One-line summary**: When a prompt draft or Claude Code's task list leaves the panel a single row, it shows one line with the current phase's progress and its agents; clearing the draft or hiding the task list with `ctrl+t` restores it.
-- **Opening and closing**: The panel opens automatically when a task starts, and `/flow` opens it at any time. While tasks run it can only be folded, and it can be closed once all have ended; a panel that opened automatically hides 30 seconds after all tasks end.
+- **Opening and closing**: The panel opens automatically when a task starts, and `/flow` opens it at any time. Press `q` at any time to hide it; tasks keep running and `/flow` reopens it; a panel that opened automatically hides 30 seconds after all tasks end.
 
 ![Agent detail: brief, progress and steer field](docs/images/panel-agent.png)
 
@@ -83,7 +83,7 @@ Parallel writes are handled as in Claude's Workflow: the orchestrator splits tas
 | `Enter` in the steer field | Send the instruction to that agent |
 | `b` | Go back one level; in the one-line summary, return to the task list |
 | `x` | Stop the selected task or the whole flow |
-| `q` | Close the panel, available once all tasks have ended |
+| `q` | Hide the panel (also while tasks run; they keep running) |
 | `Esc` | Return to the prompt |
 | `ctrl+x ctrl+a` | Expand the panel after Claude Code folds it |
 

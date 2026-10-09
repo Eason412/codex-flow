@@ -23,7 +23,8 @@ export type ViewContext = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'> 
   spinner: string | undefined
   agentSpinner: string | undefined
   round: number
-  canHide: boolean
+  // 收起键的文字：有任务在跑时叫「收起」（任务照常跑，/flow 再打开），都结束了叫「关闭」
+  hideLabel: string
   width: number
   maxRows: number
   starts: WindowStarts
@@ -116,10 +117,10 @@ const buttonCells = (label: string) => 3 + cells(label)
 function footer(ctx: ViewContext, foot: Foot, room: number) {
   const { Button, callbacks } = ctx
   let stop = foot.stop
-  let hide = ctx.canHide
-  const labelsOf = () => [stop, foot.back ? '返回' : null, hide ? '关闭' : null].filter((b): b is string => !!b)
+  let hide = true
+  const labelsOf = () => [stop, foot.back ? '返回' : null, hide ? ctx.hideLabel : null].filter((b): b is string => !!b)
   const widthOf = () => labelsOf().reduce((sum, b) => sum + buttonCells(b), 0) + Math.max(0, labelsOf().length - 1) * 3
-  // 窄栏先缩短停止标签，再省关闭；返回与停止优先保留。
+  // 窄栏先缩短停止标签，再省收起键；返回与停止优先保留。
   if (widthOf() > room && stop) stop = '停止'
   if (widthOf() > room && hide) hide = false
   const labels = labelsOf()
@@ -133,7 +134,7 @@ function footer(ctx: ViewContext, foot: Foot, room: number) {
   const buttons: RenderElement[] = []
   if (stop) buttons.push(<Button plain dimColor hotkey="x" key="stop" label={stop} onPress={() => callbacks.pressStop()} />)
   if (foot.back) buttons.push(<Button plain dimColor hotkey="b" key="back" label="返回" onPress={() => callbacks.goBack()} />)
-  if (hide) buttons.push(<Button plain dimColor hotkey="q" key="hide" label="关闭" onPress={() => callbacks.pressHide()} />)
+  if (hide) buttons.push(<Button plain dimColor hotkey="q" key="hide" label={ctx.hideLabel} onPress={() => callbacks.pressHide()} />)
   buttons.forEach((node, i) => {
     if (i) nodes.push(text(ctx, ' · ', MUTED))
     nodes.push(node)
@@ -173,7 +174,7 @@ function bottomBorder(ctx: ViewContext, left: Column, right: Column, foot: Foot)
   let rp = right.pager
   let pagerWidth = rp ? pagerCells(rp) + 2 : 0
   let foot2 = footer(ctx, foot, rw - pagerWidth - 4)
-  if (!foot2.width && (foot.stop || foot.back || ctx.canHide)) {
+  if (!foot2.width && (foot.stop || foot.back || ctx.hideLabel)) {
     // 右栏放不下按钮时先省右栏翻页提示；仍放不下就用整条下边线。
     rp = null
     pagerWidth = 0

@@ -74,7 +74,7 @@ function renderEmpty(ctx: ViewContext) {
   if (maxRows >= 2) rows.push(
     <Box width={width}>
       {text(ctx, '本会话还没有派出 Codex 任务。', MUTED)}
-      {ctx.canHide ? [text(ctx, ' · ', MUTED), <Button plain dimColor hotkey="q" key="hide" label="关闭" onPress={() => callbacks.pressHide()} />] : null}
+      {[text(ctx, ' · ', MUTED), <Button plain dimColor hotkey="q" key="hide" label={ctx.hideLabel} onPress={() => callbacks.pressHide()} />]}
     </Box>,
   )
   return { tree: <Box flexDirection="column" width={width}>{maxRows >= 1 ? rows : []}</Box>, sizes: sameSize(1) }

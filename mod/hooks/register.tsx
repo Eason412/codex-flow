@@ -325,10 +325,11 @@ async function pressStop($: Engine) {
   $.ui.toast('先选中一项再按 x')
 }
 
+// 随时可以收起：任务照常跑，失联提醒照常进对话；同一轮不再自动弹出，新任务开始才会。/flow 重新打开
 async function pressHide($: Engine) {
-  // 渲染后可能刚开始新任务，旧按钮也不能关闭运行中的面板。
-  if ((await read($, runs)).some(r => r.status === 'running')) return
+  const running = (await read($, runs)).some(r => r.status === 'running')
   await setShown($, false, 'user-hide')
+  if (running) $.ui.toast('已收起，Codex 任务继续运行；输入 /flow 重新打开')
 }
 
 // 写进控制目录，执行器每秒取走、用 turn/steer 发给这个 Codex；送达或被拒都会出现在详情的「过程」里
@@ -459,7 +460,7 @@ const renderPanel: MatchedHook<'ui.render', { component: 'AbovePrompt' }> = asyn
     hot: await read($, focused), round: await read($, steerRound), starts: await read($, windows),
     width: panelWidth(e.props.bodyColumns), maxRows,
     spinner: SPIN[tick % SPIN.length], agentSpinner: AGENT_SPIN[tick % AGENT_SPIN.length],
-    canHide: !all.some(r => r.status === 'running'), callbacks: viewCallbacks($),
+    hideLabel: all.some(r => r.status === 'running') ? '收起' : '关闭', callbacks: viewCallbacks($),
   }
   const view = drawPanel(ctx)
   windowSize = view.sizes
