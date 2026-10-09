@@ -1,16 +1,12 @@
 // 写入租约：写入范围重叠的任务不同时运行，后开始的排队等前一个结束（效果等于给它们加了 after）。
 // 只有声明了非空 writes 的任务有租约；没写 writes 的任务范围不明，照常并行，只在开始时提示（见 overlapNotes）
 import path from "node:path";
-import { realPath } from "./scope.mjs";
+import { realPath, scopePattern } from "./scope.mjs";
 
 // 写入范围换成绝对路径前缀：glob 取通配符之前的目录部分，宁可多算重叠也不漏
 export function leaseOf(writes, cwd) {
   if (!Array.isArray(writes) || !writes.length) return null;
-  return writes.map((raw) => {
-    const segments = path.resolve(cwd, raw).split(path.sep);
-    const glob = segments.findIndex((s) => /[*?[\]{}]/.test(s));
-    return realPath(glob < 0 ? segments.join(path.sep) : segments.slice(0, glob).join(path.sep) || path.sep);
-  });
+  return writes.map((raw) => scopePattern(raw, cwd).literal);
 }
 
 const within = (inner, outer) => inner === outer || inner.startsWith(outer.endsWith(path.sep) ? outer : outer + path.sep);

@@ -50,23 +50,24 @@ function changedFiles(before, after) {
 }
 
 // 范围写法：相对任务工作目录的路径或 glob，也可以写绝对路径；写目录名包含其下所有文件，「.」表示整个工作目录，glob 也匹配点开头的文件。
-// 通配符之前的目录部分按 realpath 换算，符号链接目录与真实路径一致
-function scopePatterns(patterns, cwd) {
-  const base = realPath(cwd);
-  return patterns.map((raw) => {
-    const segments = path.resolve(cwd, raw).split(path.sep);
-    const glob = segments.findIndex((s) => /[*?[\]{}]/.test(s));
-    const literal = glob < 0 ? segments.join(path.sep) : segments.slice(0, glob).join(path.sep) || path.sep;
-    const rest = glob < 0 ? [] : segments.slice(glob);
-    return path.relative(base, path.join(realPath(literal), ...rest));
-  });
+// 先从声明本身找通配符，再拼 cwd；cwd 按字面处理，固定目录按 realpath 对齐。租约也用同一前缀。
+export function scopePattern(raw, cwd) {
+  const segments = path.normalize(raw).split(path.sep);
+  const glob = segments.findIndex((s) => /[*?[\]{}]/.test(s));
+  const prefix = glob < 0 ? raw : segments.slice(0, glob).join(path.sep) || (path.isAbsolute(raw) ? path.sep : ".");
+  return { literal: realPath(path.resolve(cwd, prefix)), rest: glob < 0 ? "" : path.join(...segments.slice(glob)) };
 }
 
 export function inScope(file, patterns, cwd) {
-  const rel = path.relative(realPath(cwd), file);
+  const base = realPath(cwd);
+  const rel = path.relative(base, file);
   const undot = (p) => p.replace(/(^|\/)\./g, "$1\u0000");
-  return scopePatterns(patterns, cwd).some((p) =>
-    (p === "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) || rel === p || rel.startsWith(`${p}/`) || path.matchesGlob(undot(rel), undot(p)));
+  return patterns.some((raw) => {
+    const { literal, rest } = scopePattern(raw, cwd);
+    const p = path.relative(base, path.join(literal, rest));
+    return (p === "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
+      || rel === p || rel.startsWith(`${p}/`) || path.matchesGlob(undot(rel), undot(p));
+  });
 }
 
 // 越界：Codex 自己的改文件记录里出现了范围外的路径，确定是这个任务写的。

@@ -12,7 +12,7 @@ const SCHEMAS = path.resolve(here, "..", "schemas");
 
 export function loadSchema(name) {
   if (!name) return null;
-  const file = fs.existsSync(name) ? name : path.join(SCHEMAS, `${name}.json`);
+  const file = ["report", "result", "review", "opinion"].includes(name) ? path.join(SCHEMAS, `${name}.json`) : name;
   const schema = readJson(file);
   if (!schema) die(`找不到 schema: ${name}（内置: review / opinion / result / report）`);
   return schema;
@@ -72,7 +72,7 @@ export function phaseNotes(plan) {
   const notes = [];
   for (const { title } of plan.phases) {
     const name = String(title).trim();
-    if (/sol|astra|gpt|luna/i.test(name)) notes.push(`阶段名「${name}」写了模型名；阶段名写这一步交出什么（动作＋对象），模型看任务就知道`);
+    if (/(?<![a-z\d_])(sol|astra|gpt|luna)(?![a-z\d_])/i.test(name)) notes.push(`阶段名「${name}」写了模型名；阶段名写这一步交出什么（动作＋对象），模型看任务就知道`);
     else if (BARE_PHASE.has(name)) notes.push(`阶段名「${name}」只有动作，看不出交出什么；写成动作＋对象，例如「实现分页接口」`);
   }
   return notes;
@@ -151,9 +151,12 @@ function dependencies(plan) {
     for (const task of phase.tasks) {
       const set = new Set();
       const add = (name, kind, how) => {
-        if (kind !== "phase" && labels.has(name)) set.add(name);
-        else if (kind !== "task" && byPhase.has(name)) for (const label of byPhase.get(name)) set.add(label);
-        else die(`任务「${task.label}」的 ${how} 指向不存在的${kind === "phase" ? "阶段" : kind === "task" ? "任务" : "任务或阶段"}: ${name}`);
+        const taskMatch = kind !== "phase" && labels.has(name);
+        const phaseMatch = kind !== "task" && byPhase.has(name);
+        // after 没指定种类，同名任务与阶段取并集；明确的引用只取对应种类
+        if (taskMatch) set.add(name);
+        if (phaseMatch) for (const label of byPhase.get(name)) set.add(label);
+        if (!taskMatch && !phaseMatch) die(`任务「${task.label}」的 ${how} 指向不存在的${kind === "phase" ? "阶段" : kind === "task" ? "任务" : "任务或阶段"}: ${name}`);
       };
       if (task.after === undefined) for (const label of index > 0 ? byPhase.get(plan.phases[index - 1].title) : []) set.add(label);
       else for (const name of task.after) add(name.trim(), null, "after");
@@ -195,16 +198,13 @@ export function renderPrompt(prompt, state, dir, injected = []) {
     return text;
   };
   const find = (label) => state.tasks.find((t) => t.label === label.trim());
+  // 只扫描原始 prompt，注入的结果即使包含引用示例也原样保留
   return prompt
-    .replace(/\{\{phase:([^}]+)\}\}/g, (_, title) =>
-      inject(state.tasks.filter((t) => t.phase === title.trim()).map((t) => `### ${t.label}\n${resultOf(t)}`).join("\n\n")))
-    .replace(/\{\{task:([^}]+)\}\}/g, (_, label) => {
-      const task = find(label);
-      return task ? inject(resultOf(task)) : `（没有名为「${label}」的任务）`;
-    })
-    .replace(/\{\{path:([^}]+)\}\}/g, (_, label) => {
-      const task = find(label);
-      if (!task) return `（没有名为「${label}」的任务）`;
+    .replace(/\{\{(phase|task|path):([^}]+)\}\}/g, (_, kind, name) => {
+      if (kind === "phase") return inject(state.tasks.filter((t) => t.phase === name.trim()).map((t) => `### ${t.label}\n${resultOf(t)}`).join("\n\n"));
+      const task = find(name);
+      if (!task) return `（没有名为「${name}」的任务）`;
+      if (kind === "task") return inject(resultOf(task));
       return task.status === "completed" && task.result ? path.join(dir, task.result) : `（任务「${task.label}」未完成：${task.status}）`;
     })
     .replaceAll(LITERAL_BRACES, "{{");
