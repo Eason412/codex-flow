@@ -1,226 +1,109 @@
-// flow 的两栏尺寸、阶段行和 agent 行；按树序构建可选项与内框。
-import type { RenderElement } from 'claude-code'
-import type { FlowRun, FlowTask, Nav } from '../types'
-import { BLUE, TIME_SLOT, TOKEN_SLOT, WORD, cells, fit, glyph, formatTokens, tasksOf, doneOf, agentTime, modelText, phaseTime } from './format'
-import { defaultPhase, phaseKey, taskKey, detailKey, canSteer } from './navigation'
+// 终端两栏的行：左栏的运行与阶段、右栏的 agent。各段放进定宽的格子：左栏标记、名称、进度对齐，右栏名字、模型、状态、时间四列对齐。
+import type { FlowRun, FlowTask } from '../types'
+import { ACCENT, FAIL, KIND, MUTED, RUNNING, TIME_SLOT, agentState, agentTime, cells, doneOf, fit, glyph, modelText, tasksOf } from './format'
+import type { LeftItem } from './navigation'
+import { faded, taskKey } from './navigation'
 import type { ViewContext } from './render-frame'
-import { windowed, withMore, dimFast, mark } from './render-frame'
+import { cell, row, text } from './render-frame'
 
-export type FlowContext = ViewContext & {
-  run: FlowRun
-  phase: string | null
-  agents: FlowTask[]
-  level: Nav['level']
-  task: FlowTask | undefined
-  countWidth: number
-  numWidth: number
-  timeCell: number
-  leftWidth: number
-  labelWidth: number
-  rightWidth: number
-  modelCell: number
-  steer: boolean
-}
+const countOf = (tasks: FlowTask[]) => `${doneOf(tasks)}/${tasks.length}`
 
-export function flowContext(ctx: ViewContext, run: FlowRun): FlowContext {
-  const { Input, at, columns, framed } = ctx
-  const phase = at.phase ?? defaultPhase(run)
-  const agents = tasksOf(run, phase)
-  const level = at.level
-  const task = level === 'agent' ? agents.find(t => t.label === at.label) : undefined
-  // 左栏按内容定宽（阶段栏和详情左栏不同），右栏吃掉剩下的宽度，整块始终占满面板
-  // 进度按「总数/总数」预留，完成数进位时不跳
-  const countWidth = Math.max(3, ...run.phases.map(p => `${tasksOf(run, p.title).length}/${tasksOf(run, p.title).length}`.length))
-  // 阶段一行：选中标记 2 + 序号 + 空格 + 图标 + 空格 + 名称 + 进度 + 耗时（固定预留）
-  const numWidth = String(run.phases.length).length
-  const timeCell = TIME_SLOT
-  const leftWidth =
-    level === 'agent'
-      ? Math.min(20, Math.max(16, ...agents.map(t => cells(t.label) + 4)))
-      : Math.min(32, Math.max(16, Math.max(4, ...run.phases.map(p => cells(p.title))) + 6 + numWidth + countWidth + timeCell))
-  const labelWidth = Math.min(16, Math.max(4, ...run.tasks.map(t => cells(t.label))))
-  // 两栏之间 3 格，有内框时左右再各 2 格
-  const rightWidth = Math.max(8, columns - leftWidth - (framed ? 7 : 3))
-  // agent 一行：选中标记 2 + 图标 1 + 空格 1 + 名称 labelWidth+1 + 模型 effort + token（固定预留）+ 耗时（固定预留）
-  // 模型栏吃掉多余宽度，token 和时长栏始终贴右
-  const modelCell = Math.max(1, rightWidth - 5 - labelWidth - TOKEN_SLOT - TIME_SLOT)
-
-  const steer = !!Input && !!task && canSteer(run, task)
-  return { ...ctx, run, phase, agents, level, task, countWidth, numWidth, timeCell, leftWidth, labelWidth, rightWidth, modelCell, steer }
-}
-
-export function renderLeftColumn(ctx: FlowContext) {
-  const { at, hot } = ctx
-  const { run, level, agents, phase } = ctx
-  const leftColumn = level === 'agent' ? 'detailAgents' : 'phases'
-  const leftWin = level === 'agent'
-    ? windowed(ctx, agents, 'detailAgents', t => detailKey(run.runId, t.label), hot && agents.some(t => detailKey(run.runId, t.label) === hot) ? hot : at.label ? detailKey(run.runId, at.label) : null)
-    : windowed(ctx, run.phases, 'phases', p => phaseKey(p.title), hot && run.phases.some(p => phaseKey(p.title) === hot) ? hot : phase ? phaseKey(phase) : null)
-
-  const items = level === 'agent'
-    ? (leftWin.items as FlowTask[]).map(t => detailAgentRow(ctx, t))
-    : (leftWin.items as FlowRun['phases']).map((p, i) => phaseRow(ctx, p, leftWin.start + i))
-  return withMore(ctx, items, leftColumn, leftWin, true)
-}
-
-function detailAgentRow(ctx: FlowContext, t: FlowTask) {
-  const { Box, Text, Button, at, callbacks } = ctx
-  const { run, leftWidth } = ctx
-  const key = detailKey(run.runId, t.label)
-  const me = t.label === at.label
-  return (
-    <Box>
-      <Text color={BLUE}>{me ? '❯ ' : '  '}</Text>
-      {mark(ctx, t.status)}
-      <Text> </Text>
-      <Button
-        plain
-        key={key}
-        label={fit(t.label, leftWidth - 4)}
-        dimColor={me ? undefined : true}
-        onPress={() => callbacks.selectDetail(run, t)}
-      />
-    </Box>
+// 左栏各段的宽度按列出的全部运行算，选中别的运行、阶段展开收起时宽度不变；进度按「总数/总数」预留，完成数进位时不跳
+export function leftSizes(list: FlowRun[]) {
+  const multi = list.length > 1
+  const phased = list.filter(r => !multi || (r.kind === 'flow' && r.phases.length > 1))
+  const counts = [
+    ...phased.flatMap(r => r.phases.map(p => tasksOf(r, p.title).length)),
+    ...(multi ? list.filter(r => r.kind === 'flow').map(r => r.tasks.length) : []),
+  ]
+  const countWidth = Math.max(3, ...counts.map(n => `${n}/${n}`.length))
+  const symWidth = Math.max(1, ...phased.map(r => String(r.phases.length).length))
+  // 一行：缩进 + 标记 2 + 符号 + 空格 + 名称 + 空格 + 进度
+  const fixed = 2 + symWidth + 2 + countWidth
+  const want = Math.max(
+    ...phased.flatMap(r => r.phases.map(p => (multi ? 2 : 0) + fixed + cells(p.title))),
+    ...(multi ? list.map(r => fixed + cells(r.name)) : []),
   )
+  return { countWidth, symWidth, want }
 }
 
-function phaseRow(ctx: FlowContext, p: FlowRun['phases'][number], index: number) {
-  const { Box, Text, Button, hot, spinner, callbacks } = ctx
-  const { run, phase, leftWidth, numWidth, countWidth, timeCell } = ctx
-  const ts = tasksOf(run, p.title)
-  const me = p.title === phase
-  const live = p.status === 'running'
-  const [g, color] = glyph(p.status)
-  const sign = live ? spinner : g
-  const count = `${doneOf(ts)}/${ts.length}`
-  const time = phaseTime(run, p.title)
-  const titleWidth = Math.max(1, leftWidth - 5 - numWidth - countWidth - timeCell)
-  // 蓝色只表示运行中；选中的阶段不变暗，其余阶段暗色
-  const tone = live ? BLUE : undefined
-  const dim = !live && !me
-  return (
-    <Box>
-      <Text color={BLUE}>{hot === phaseKey(p.title) ? '❯ ' : '  '}</Text>
-      <Text color={tone} dimColor={dim}>
-        {String(index + 1).padStart(numWidth)}
-      </Text>
-      <Text> </Text>
-      <Text color={live ? BLUE : color} dimColor={!live && !color}>
-        {sign}
-      </Text>
-      <Text> </Text>
-      <Box width={titleWidth}>
-        <Button
-          plain
-          key={phaseKey(p.title)}
-          label={fit(p.title, titleWidth - 1)}
-          dimColor={dim ? true : undefined}
-          onPress={() => callbacks.selectPhase(run, p.title)}
-        />
-      </Box>
-      <Box width={countWidth} justifyContent="flex-end">
-        <Text color={tone} dimColor={dim}>
-          {count}
-        </Text>
-      </Box>
-      <Box width={timeCell} justifyContent="flex-end">
-        <Text color={tone} dimColor={dim}>
-          {time}
-        </Text>
-      </Box>
-    </Box>
-  )
+// 左栏需要的行数：取各种选法里最多的，光标换运行时高度不跳
+export function leftNeed(list: FlowRun[]) {
+  if (list.length === 1) return list[0]!.phases.length
+  return list.length + Math.max(0, ...list.filter(r => r.kind === 'flow' && r.phases.length > 1).map(r => r.phases.length))
 }
+export const rightNeed = (list: FlowRun[]) => Math.max(1, ...list.flatMap(r => r.phases.map(p => tasksOf(r, p.title).length)))
 
-export function renderAgentRows(ctx: FlowContext) {
-  const { Box, Text, Button, hot, callbacks } = ctx
-  const { run, agents, level, phase, labelWidth, modelCell } = ctx
-  let rightTitle: string
-  let rightCells: RenderElement[]
-  // agent 栏里光标在某个 agent 上时，栏标题写它的任务说明
-  const hotAgent = agents.find(t => taskKey(run.runId, t.label) === hot)
-  rightTitle = level === 'agents' && hotAgent?.brief ? `${hotAgent.label}：${hotAgent.brief}` : `${phase ?? ''} · ${agents.length} 个 agent`
-  const runningAgent = agents.find(t => t.status === 'running')
-  const preferred = hotAgent ? hot : runningAgent ? taskKey(run.runId, runningAgent.label) : null
-  const rightWin = windowed(ctx, agents, 'agents', t => taskKey(run.runId, t.label), preferred)
-  rightCells = withMore(ctx, rightWin.items.map(t => {
-    const key = taskKey(run.runId, t.label)
-    const tokens = t.tokens ? `${formatTokens(t.tokens)} tok` : ''
-    // 耗时栏：运行中和完成写时长，复用写「复用」，验收中写「验收中」，其余写状态（等待、失败等）
-    const time = t.checking ? '验收中' : agentTime(t) || (WORD[t.status] ?? t.status)
-    return (
-      <Box>
-        <Text color={BLUE}>{hot === key ? '❯ ' : '  '}</Text>
-        {mark(ctx, t.status)}
-        <Text> </Text>
-        <Box width={labelWidth + 1}>
-          <Button plain key={key} label={fit(t.label, labelWidth)} dimColor={t.status === 'running' ? undefined : true} onPress={() => callbacks.selectAgent(run, t)} />
-        </Box>
-        <Box width={modelCell}>
-          {dimFast(ctx, fit(modelText(t), modelCell))}
-        </Box>
-        <Box width={TOKEN_SLOT} justifyContent="flex-end">
-          <Text dimColor>{tokens}</Text>
-        </Box>
-        <Box width={TIME_SLOT} justifyContent="flex-end">
-          <Text dimColor>{time}</Text>
-        </Box>
-      </Box>
-    )
-  }), 'agents', rightWin, true)
-  if (!agents.length) rightCells = [<Text dimColor>这个阶段没有 agent</Text>]
+type LeftContext = ViewContext & { run: FlowRun; width: number; countWidth: number; symWidth: number; selected: string }
 
-  return { rightTitle, rightCells }
-}
-
-function columnBorder(ctx: FlowContext, left: string, right: string, top: boolean) {
-  const { Box, Text } = ctx
-  const { leftWidth, rightWidth } = ctx
-  const seg = (w: number, title: string) => {
-    if (!top) return { title: '', dash: '─'.repeat(w) }
-    const t = ` ${fit(title, w - 3)} `
-    return { title: t, dash: '─'.repeat(Math.max(0, w - 1 - cells(t))) }
+// 左栏一行：选中项前是紫色 ❯（按钮本身上不了色）；状态符号用状态色，没开始的阶段写序号
+export function leftRow(ctx: LeftContext, item: LeftItem) {
+  const { Button, callbacks, spinner, agentSpinner, width, countWidth, symWidth, selected } = ctx
+  const indent = item.phase && ctx.list.length > 1 ? 2 : 0
+  const me = item.key === selected
+  const nameWidth = Math.max(1, width - indent - 2 - symWidth - 2 - countWidth)
+  let sym: [string, string]
+  let name: string
+  let count: string
+  let dim: boolean
+  let press: () => Promise<void>
+  if (item.phase) {
+    const p = item.phase
+    const [g, color] = glyph(p.status)
+    sym = p.status === 'running' ? [spinner ?? g, RUNNING] : p.status === 'pending' ? [String(item.index + 1), MUTED] : [g, color]
+    name = p.title
+    count = countOf(tasksOf(item.run, p.title))
+    dim = !me && p.status !== 'running'
+    press = () => callbacks.selectPhase(item.run, p.title)
+  } else {
+    const r = item.run
+    const [kind, color] = KIND[r.kind]
+    const broken = r.status === 'failed' || r.status === 'cancelled' || r.status === 'lost' || r.status === 'partial'
+    sym = r.status === 'running' ? [(r.kind === 'flow' ? spinner : agentSpinner) ?? kind, color] : broken ? glyph(r.status) : [kind, color]
+    name = r.name
+    count = r.kind === 'flow' ? countOf(r.tasks) : ''
+    dim = faded(r) || (r.runId !== ctx.run.runId && r.status !== 'running')
+    press = () => callbacks.openRun(r)
   }
-  const l = seg(leftWidth + 2, left)
-  const r = seg(rightWidth + 2, right)
-  return (
-    <Box>
-      <Text dimColor>{top ? '╭─' : '╰'}</Text>
-      {top && <Text>{l.title}</Text>}
-      <Text dimColor>
-        {l.dash}
-        {top ? '┬─' : '┴'}
-      </Text>
-      {top && <Text>{r.title}</Text>}
-      <Text dimColor>
-        {r.dash}
-        {top ? '╮' : '╯'}
-      </Text>
-    </Box>
-  )
+  const label = fit(name, nameWidth)
+  return row(ctx, width, [
+    cell(ctx, indent, []),
+    cell(ctx, 2, text(ctx, me ? '❯' : ' ', ACCENT)),
+    cell(ctx, symWidth, text(ctx, sym[0], sym[1]), true),
+    cell(ctx, 1, []),
+    cell(ctx, nameWidth + 1, <Button plain key={item.key} label={label} dimColor={dim ? true : undefined} onPress={press} />),
+    cell(ctx, countWidth, text(ctx, count, MUTED), true),
+  ])
 }
 
-export function renderColumns(ctx: FlowContext, leftCells: RenderElement[], rightCells: RenderElement[], rightTitle: string) {
-  const { Box, Text, bodyRows, framed } = ctx
-  const { level, phase, leftWidth, rightWidth } = ctx
-  // 两栏各是一列：光标按树序先走完左栏再到右栏，不会在两栏之间来回跳
-  // 两栏补到可用高度，内框和外框一样固定大小
-  const height = Math.max(leftCells.length, rightCells.length, bodyRows)
-  const fill = (items: RenderElement[]) => [...items, ...Array.from({ length: height - items.length }, () => <Text> </Text>)]
-  const bar = (text: string) => <Box flexDirection="column">{Array.from({ length: height }, () => <Text dimColor>{text}</Text>)}</Box>
-  const body = (
-    <Box flexDirection="column">
-      {framed && columnBorder(ctx, level === 'agent' ? `${phase ?? ''}` : '阶段', rightTitle, true)}
-      <Box>
-        {framed && bar('│ ')}
-        <Box flexDirection="column" width={leftWidth}>{fill(leftCells)}</Box>
-        {bar(' │ ')}
-        <Box flexDirection="column" width={rightWidth}>{fill(rightCells)}</Box>
-        {framed && bar(' │')}
-      </Box>
-      {framed && columnBorder(ctx, '', '', false)}
-    </Box>
-  )
+// 右栏各列的宽度：名字和模型按列出的全部 agent 定宽，状态列吃掉剩下的，时间贴右；太窄时先收名字再收模型
+export function agentSizes(list: FlowRun[], width: number) {
+  const tasks = list.flatMap(r => r.tasks)
+  let nameWidth = Math.min(24, Math.max(4, ...tasks.map(t => cells(t.label))))
+  let modelWidth = Math.min(20, Math.max(4, ...tasks.map(t => cells(modelText(t)))))
+  const statusOf = () => width - 4 - nameWidth - 2 - modelWidth - 2 - TIME_SLOT
+  if (statusOf() < 10) nameWidth = Math.max(6, nameWidth - (10 - statusOf()))
+  if (statusOf() < 10) modelWidth = Math.max(6, modelWidth - (10 - statusOf()))
+  return { nameWidth, modelWidth, statusWidth: Math.max(0, statusOf()) }
+}
 
-  return { body, height }
+type AgentContext = ViewContext & { run: FlowRun; width: number; nameWidth: number; modelWidth: number; statusWidth: number }
+
+// agent 一行：状态符号、名字、模型 effort（暗灰）、状态文字、时间（右对齐）。已结束和没开始的行名字与文字略暗，运行中正常亮度，失败文字红色
+export function agentRow(ctx: AgentContext, t: FlowTask) {
+  const { Button, callbacks, agentSpinner, at, hot, run, width, nameWidth, modelWidth, statusWidth } = ctx
+  const key = taskKey(run.runId, t.label)
+  const [g, color] = glyph(t.status)
+  const live = t.status === 'running'
+  const state = agentState(t)
+  const bright = live || state.fail
+  const label = fit(t.label, nameWidth)
+  return row(ctx, width, [
+    cell(ctx, 2, text(ctx, at.level === 'agents' && hot === key ? '❯' : ' ', ACCENT)),
+    cell(ctx, 2, text(ctx, live ? agentSpinner ?? g : g, color)),
+    cell(ctx, nameWidth + 2, <Button plain key={key} label={label} dimColor={bright ? undefined : true} onPress={() => callbacks.selectAgent(run, t)} />),
+    cell(ctx, modelWidth + 2, text(ctx, fit(modelText(t), modelWidth), MUTED)),
+    cell(ctx, statusWidth, text(ctx, fit(state.text, statusWidth), state.fail ? FAIL : live ? undefined : MUTED)),
+    cell(ctx, TIME_SLOT, text(ctx, agentTime(t), MUTED), true),
+  ])
 }

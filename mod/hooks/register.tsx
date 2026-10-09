@@ -3,16 +3,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register, MatchedHook } from 'claude-code'
 import type { FlowRun, FlowTask, PanelRecord, WindowColumn, WindowStarts } from '../types'
-import { SPIN, AGENT_SPIN, SPIN_MS, fileSafe, formatDuration, tasksOf } from './format'
-import { TOP, currentRuns, listedRuns, entry, runKey, phaseKey, taskKey, detailKey, isItem, canSteer, steerKey } from './navigation'
+import { SPIN, AGENT_SPIN, SPIN_MS, breathPhase, fileSafe, formatDuration, tasksOf } from './format'
+import { TOP, currentRuns, listedRuns, entry, leftKey, runKey, taskKey, detailKey, isItem, canSteer, steerKey } from './navigation'
 import type { ActionContext } from './panel-actions'
-import { applyShown, autoShow, moveTo, syncWindows, revealFocus, trackFocus, shiftWindow, goBack, goList, openRun, selectPhase, selectAgent, selectDetail } from './panel-actions'
+import { applyShown, autoShow, moveTo, syncWindows, revealFocus, trackFocus, shiftWindow, goBack, openRun, selectPhase, selectAgent, selectDetail, pageRedirect } from './panel-actions'
 import { readRunList, loadResult } from './state-reader'
 import type { ViewContext } from './render-frame'
-import { panelDimensions } from './render-frame'
-import { renderRunList } from './render-list'
-import { renderSingle } from './render-agent'
-import { renderFlow } from './render-flow'
+import { isVertical, panelWidth } from './render-frame'
+import { drawPanel } from './render-flow'
 
 const REFRESH_MS = 2000
 const DEFAULT_ALERT_AFTER = 900
@@ -31,10 +29,12 @@ const kept = atom({ plugin: 'codex-flow', key: 'kept' } as const, [] as string[]
 const auto = atom({ plugin: 'codex-flow', key: 'auto' } as const, false)
 const frame = atom({ plugin: 'codex-flow', key: 'frame' } as const, 0)
 const steerRound = atom({ plugin: 'codex-flow', key: 'steerRound' } as const, 0)
-const EMPTY_WINDOWS: WindowStarts = { runs: 0, phases: 0, agents: 0, detailAgents: 0 }
+const EMPTY_WINDOWS: WindowStarts = { left: 0, agents: 0, detailAgents: 0 }
 const windows = atom({ plugin: 'codex-flow', key: 'windows' } as const, EMPTY_WINDOWS)
-// 焦点事件沿用当前绘制的容量；各列起点保存在 $.state。
-let windowSize = 12
+// 焦点事件沿用当前绘制的各列行数；各列起点保存在 $.state。
+let windowSize: WindowStarts = { left: 4, agents: 4, detailAgents: 4 }
+// 当前画的是不是竖排版面（非终端）：导航、翻页和停止键的行为随之不同
+let vertical = false
 
 // 别的会话里已结束的运行不再每次读；记下 state.json 的修改时间，被本会话续跑（--resume）改写后重新读
 const otherSession = new Map<string, number>()
@@ -139,6 +139,7 @@ async function readRuns($: Engine) {
   }
   await syncWindows(actionContext($))
   await remind($, reminderRuns)
+  await openSingleView($, list)
   // 结果页打开时任务刚好出了结果，补读一次
   const at = await read($, nav)
   if (at.label && at.text === null) {
@@ -149,6 +150,20 @@ async function readRuns($: Engine) {
       await update($, nav, n => (n.runId === at.runId && n.label === at.label ? { ...n, text } : n))
     }
   }
+}
+
+// 竖排版面里单发 agent 的页面直接画结果，结果文本读进 nav（label 只用来读文本，不是详情层）；
+// 页面是自动打开或重载后直接落到的，没经过 openRun，在这里补上
+async function openSingleView($: Engine, list: FlowRun[]) {
+  if (!vertical) return
+  const at = await read($, nav)
+  const shown = listedRuns(list, await read($, kept), at.runId)
+  const valid = shown.some(r => r.runId === at.runId) && at.level
+  const target = valid ? at : entry(shown).to
+  const run = shown.find(r => r.runId === target.runId)
+  const task = run?.tasks[0]
+  if (!run || run.kind !== 'single' || !task || (shown.length > 1 && target.level === 'phases') || target.label === task.label) return
+  await update($, nav, () => ({ ...target, label: task.label, text: null }))
 }
 
 // 状态决定和变更共用一条队列；慢文件写入不阻塞用户操作。
@@ -278,11 +293,13 @@ async function focusOn($: Engine, key: string | null) {
   }
 }
 
-// x：阶段栏停整个 flow，agent 栏和详情停选中的 agent，列表里停选中的运行
+// x：光标在左栏时停选中的运行（flow 整个停），右栏和详情停选中的 agent
 async function pressStop($: Engine) {
   const all = await read($, runs)
   const now = await read($, nav)
   const target = all.find(r => r.runId === now.runId)
+  // 竖排版面：flow 页停整个 flow，详情页停那个 agent；单发 agent 的页面就是它自己
+  if (vertical && now.level !== 'agent' && target) return stopRun($, target)
   if (now.level === 'phases' && target) return stopRun($, target)
   const key = now.level === 'agent' && now.label ? taskKey(now.runId ?? '', now.label) : await read($, focused)
   const hitRun = all.find(r => key === runKey(r.runId))
@@ -318,16 +335,23 @@ async function sendSteer($: Engine, runId: string, label: string, value: string)
   await focusOn($, steerKey(runId, label, await read($, steerRound)))
 }
 
-// 光标按树序走：从 agent 栏第一项按 ↑ 会落到阶段栏最下面一项，从插话框按 ↑ 会落到左栏最后一个 agent。
-// 这两种改落到当前阶段、当前 agent。点击同时触发 onPress，点到的阶段或 agent 仍会照常打开。
+// 光标按树序走：栏里可见的头尾项往外走、那一头还有没显示的项时改成翻页（翻页提示在下边线上，树序不在栏的两端）；
+// 从 agent 栏第一项按 ↑ 会落到左栏最下面一项，从插话框按 ↑ 会落到左栏最后一个 agent，这两种改落到当前选中的那一项。
+// 点击同时触发 onPress，点到的条目仍会照常打开。
 async function redirectFocus($: Engine, key: string) {
+  const paged = await pageRedirect(actionContext($), ringAt, key)
+  if (paged) return paged
   const at = await read($, nav)
-  const run = (await read($, runs)).find(r => r.runId === at.runId)
+  const list = await read($, runs)
+  const run = list.find(r => r.runId === at.runId)
   if (!run || !at.phase) return null
+  // 竖排版面里 agent 就在自己的阶段行下面，往上走本来就落在当前阶段，这两处改道都不需要
+  if (vertical) return null
   if (at.level === 'agents') {
     const first = tasksOf(run, at.phase)[0]
-    const left = key.startsWith('p:') || key.startsWith('more:phases:')
-    if (first && ringAt === taskKey(run.runId, first.label) && left && key !== phaseKey(at.phase)) return phaseKey(at.phase)
+    const current = leftKey(listedRuns(list, await read($, kept), at.runId), run, at.phase)
+    const left = key.startsWith('p:') || key.startsWith('r:') || key.startsWith('more:left:')
+    if (first && ringAt === taskKey(run.runId, first.label) && left && key !== current) return current
   }
   if (at.level === 'agent' && at.label && ringAt?.startsWith('steer:')) {
     const mine = detailKey(run.runId, at.label)
@@ -358,6 +382,9 @@ function actionContext($: Engine): ActionContext {
     get windowSize() {
       return windowSize
     },
+    get vertical() {
+      return vertical
+    },
     focusOn: key => focusOn($, key),
     loadResult: (run, task) => loadResult(path => readText($, path), run, task),
     clearRing: () => {
@@ -375,7 +402,6 @@ function viewCallbacks($: Engine): ViewContext['callbacks'] {
     shiftWindow: (column, direction) => shiftWindow(actionContext($), column, direction),
     pressStop: () => pressStop($),
     goBack: () => goBack(actionContext($)),
-    goList: () => goList(actionContext($)),
     pressHide: () => pressHide($),
     openRun: run => openRun(actionContext($), run),
     selectPhase: (run, title) => selectPhase(actionContext($), run, title),
@@ -396,24 +422,27 @@ const renderPanel: MatchedHook<'ui.render', { component: 'AbovePrompt' }> = asyn
   const { Box, Text, Button } = elements
   // 手机端没有输入框，那里不画插话框。
   const Input = 'Input' in elements ? elements.Input : null
-  const list = await read($, runs)
-  const at = await read($, nav)
-  const shownRuns = listedRuns(list, await read($, kept), at.runId)
-  const hot = await read($, focused)
-  const tick = await read($, frame)
-  const round = await read($, steerRound)
-  const run = list.find(r => r.runId === at.runId)
-  const dimensions = panelDimensions(e.props.bodyColumns, e.props.maxRows, run, at)
-  if (!dimensions.bandRows) return <Box flexDirection="column" />
-  windowSize = dimensions.size
-  const starts = await read($, windows)
+  const Svg = 'Svg' in elements ? elements.Svg : null
+  const all = await read($, runs)
+  const nav0 = await read($, nav)
+  const list = listedRuns(all, await read($, kept), nav0.runId)
+  const maxRows = Math.max(0, Math.floor(e.props.maxRows ?? 20))
+  if (!maxRows) return <Box flexDirection="column" />
+  // nav 指向的运行不在列表里（还没有任务、或刚收起又打开）时，按打开面板的规则选一个来画
+  const at = list.some(r => r.runId === nav0.runId) && nav0.level ? nav0 : entry(list).to
+  // 转圈帧只有终端画；桌面端不读它，免得每 0.12 秒整块重画
+  const tick = e.surface === 'terminal' ? await read($, frame) : 0
   const ctx: ViewContext = {
-    Box, Text, Button, Input, at, hot, round, shownRuns, starts, ...dimensions,
+    surface: e.surface, Box, Text, Button, Input, Svg, breath: breathPhase(await $.clock.now()), list, run: list.find(r => r.runId === at.runId), at,
+    hot: await read($, focused), round: await read($, steerRound), starts: await read($, windows),
+    width: panelWidth(e.props.bodyColumns), maxRows,
     spinner: SPIN[tick % SPIN.length], agentSpinner: AGENT_SPIN[tick % AGENT_SPIN.length],
-    canHide: !list.some(r => r.status === 'running'), callbacks: viewCallbacks($),
+    canHide: !all.some(r => r.status === 'running'), callbacks: viewCallbacks($),
   }
-  if (!run || !at.level) return renderRunList(ctx)
-  return run.kind === 'single' ? renderSingle(ctx, run) : renderFlow(ctx, run)
+  const view = drawPanel(ctx)
+  windowSize = view.sizes
+  vertical = isVertical(ctx)
+  return view.tree
 }
 
 const trackPanelFocus: MatchedHook<'ui.focus', { component: 'AbovePrompt' }> = async ($, e, next) => {
@@ -423,7 +452,7 @@ const trackPanelFocus: MatchedHook<'ui.focus', { component: 'AbovePrompt' }> = a
   const key = target.element
   if (moved.deny || !key) return moved
   ringAt = key
-  const more = /^more:(runs|phases|agents|detailAgents):(up|down)$/.exec(key)
+  const more = /^more:(left|agents|detailAgents):(up|down)$/.exec(key)
   if (more) {
     await shiftWindow(actionContext($), more[1] as WindowColumn, more[2] as 'up' | 'down')
     return moved

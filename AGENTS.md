@@ -6,6 +6,8 @@
 
 整个仓库软链为 `~/.claude/skills/codex`，改动保存后立即作用于本机所有正在使用该 Skill 的会话。会改变 run.sh 参数、flow 状态文件或面板读取格式的修改，要先确认没有正在运行的 flow 依赖旧格式，再完成前后两端的同步。
 
+正在运行的 Claude Code 会话在 `mod/` 每次保存后热加载；改到一半的文件会让会话反复报 “reload failed”（旧版继续运行）。多步修改 `mod/`、`flow/` 时在单独的 git worktree 里做和验证，完成后一次性合回本仓库；委派给子代理或 Codex 时把这条写进说明（flow 用 `isolation: "worktree"`）。
+
 允许的模型、effort 和 Fast 名单只在 `models.json` 维护，run.sh 与执行器都从这里读取，不在别处另写名单。
 
 ## 修改与验证

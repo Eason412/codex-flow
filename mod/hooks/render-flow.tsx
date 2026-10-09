@@ -1,127 +1,92 @@
-// flow 视图的编排与低高度摘要；标题、停止目标和返回层级由运行数据决定。
+// 面板的入口视图：没有运行时的一行提示；终端是两栏视图（一个运行时左栏是阶段，几个运行时左栏是运行）和 agent 详情，其余 surface 是竖排版面（render-desktop.tsx）。
 import type { RenderElement } from 'claude-code'
-import type { FlowRun } from '../types'
-import { CYAN, BLUE, PURPLE, WORD, cells, fit, formatDuration, formatTokens, doneOf, tokensOf, modelText } from './format'
-import { up, taskKey } from './navigation'
+import type { FlowRun, WindowStarts } from '../types'
+import { ACCENT, MUTED, agentsWord, fit, statsOf, tasksOf } from './format'
+import { defaultPhase, leftItems, leftKey, taskKey, up } from './navigation'
 import type { ViewContext, Head, Foot } from './render-frame'
-import { dimFast, mark, shell } from './render-frame'
-import type { FlowContext } from './flow-columns'
-import { flowContext, renderLeftColumn, renderAgentRows, renderColumns } from './flow-columns'
-import { otherRuns, renderAgentDetail } from './render-agent'
+import { BODY_CAP, columnWidths, isVertical, layout, pagerOf, panel, row, text, windowed } from './render-frame'
+import { agentRow, agentSizes, leftNeed, leftRow, leftSizes, rightNeed } from './flow-columns'
+import { renderDetail } from './render-agent'
+import { drawVertical } from './render-desktop'
 
-function flowHeadAndFoot(ctx: FlowContext, othersNote: string) {
-  const { at, hot, shownRuns } = ctx
-  const { run, agents, level, task, steer } = ctx
+// 终端的顶部：一个运行时写它的名字，几个时写「Codex · N 个运行」；右侧统计是列出的全部运行合计。
+// 第二行左边：光标在右栏时写那个 agent 的任务说明，单发 agent 写它的说明，其余不写
+function headOf(ctx: ViewContext, run: FlowRun): Head {
+  const { list, at, hot } = ctx
+  const multi = list.length > 1
+  const hotAgent = at.level === 'agents' ? run.tasks.find(t => taskKey(run.runId, t.label) === hot) : undefined
+  const brief = hotAgent?.brief ? `${hotAgent.label}：${hotAgent.brief}` : !multi && run.kind === 'single' ? run.tasks[0]?.brief ?? '' : ''
+  const runs = multi ? list : [run]
+  return { name: multi ? `Codex · ${list.length} 个运行` : run.name, brief, stats: statsOf(runs) }
+}
 
+// 终端的三列用同一个窗口大小
+const sameSize = (size: number): WindowStarts => ({ left: size, agents: size, detailAgents: size })
+
+function renderColumns(ctx: ViewContext, run: FlowRun, head: Head) {
+  const { list, at, hot, starts } = ctx
+  const multi = list.length > 1
+  const phase = at.phase ?? defaultPhase(run)
+  const agents = tasksOf(run, phase)
+  ctx.callbacks.clearSteerFocus(false)
+  const lay = layout(ctx, Math.max(leftNeed(list), rightNeed(list)), BODY_CAP)
+  const size = Math.max(1, lay.body)
+  const sizes = leftSizes(list)
+  const { leftWidth, rightWidth } = columnWidths(ctx, lay, sizes.want)
+
+  const items = leftItems(list, run)
+  const selected = leftKey(list, run, phase)
+  const leftHot = hot && items.some(i => i.key === hot) ? hot : selected
+  const leftWin = windowed(items, starts.left, size, items.findIndex(i => i.key === leftHot))
+  const leftCtx = { ...ctx, run, width: leftWidth, countWidth: sizes.countWidth, symWidth: sizes.symWidth, selected }
+  const leftRows = leftWin.items.map(item => leftRow(leftCtx, item))
+
+  const keys = agents.map(t => taskKey(run.runId, t.label))
+  const preferred = at.level === 'agents' && hot && keys.includes(hot) ? keys.indexOf(hot) : agents.findIndex(t => t.status === 'running')
+  const rightWin = windowed(agents, starts.agents, size, preferred)
+  const agentCtx = { ...ctx, run, width: rightWidth, ...agentSizes(list, rightWidth) }
+  const rightRows = agents.length
+    ? rightWin.items.map(t => agentRow(agentCtx, t))
+    : [row(ctx, rightWidth, [text(ctx, fit('这个阶段没有 agent', rightWidth), MUTED)])]
+
+  // 停止键只给在跑的目标：左栏停选中的运行（flow 整个停），右栏停光标所在的 agent
+  const hotAgent = agents.find(t => taskKey(run.runId, t.label) === hot)
   const running = run.status === 'running'
-  const back = up(shownRuns, at)
-  const outer = !back
-  const hints =
-    level === 'phases' ? ['↑/↓ 选择', 'Enter 看 agent'] : level === 'agents' ? ['↑/↓ 选择', 'Enter 详情'] : steer ? ['↑/↓ 切换 agent', 'Enter 插话'] : ['↑/↓ 切换 agent']
-  // 停止键只给在跑的目标：阶段栏停整个 flow，agent 栏和详情停选中的 agent
-  const target = level === 'agent' ? task : agents.find(t => taskKey(run.runId, t.label) === hot)
-  const stop = !running ? null : level === 'phases' ? '停止整个 flow' : target?.status === 'running' ? '停止' : null
-  const foot: Foot = { hints: ['ctrl+x tab 操作', ...hints], stop, canBack: !outer, back: back?.to.runId === null ? '返回列表' : undefined }
-  const totalTokens = tokensOf(run.tasks)
-  const parallel = run.status === 'running' ? run.phases.filter(p => p.status === 'running').length : 0
-  const head: Head = {
-    name: run.name,
-    color: PURPLE,
-    sub: [WORD[run.status] ?? run.status, othersNote, parallel > 1 ? `${parallel} 个阶段并行` : ''].filter(Boolean).join(' · '),
-    right: [totalTokens ? `${formatTokens(totalTokens)} tok` : '', formatDuration(run.seconds)].filter(Boolean).join(' · '),
+  const stop = at.level === 'agents'
+    ? (hotAgent?.status === 'running' ? '停止' : null)
+    : running ? (run.kind === 'flow' ? '停止整个 flow' : '停止') : null
+  const foot: Foot = {
+    hints: ['ctrl+x tab 操作', '↑↓ 选择', at.level === 'agents' ? 'Enter 详情' : 'Enter 看 agent'],
+    stop,
+    back: !!up(list, at),
   }
-  return { head, foot, stop }
+  const tree = panel(ctx, head, lay,
+    { title: multi ? '运行' : '阶段', width: leftWidth, rows: leftRows, pager: pagerOf('left', leftWin) },
+    { title: `${phase ?? ''} · ${agentsWord(agents.length)}`, width: rightWidth, rows: rightRows, pager: pagerOf('agents', rightWin) },
+    foot)
+  return { tree, size }
 }
 
-export function renderFlow(view: ViewContext, run: FlowRun) {
-  const ctx = flowContext(view, run)
-  const { columns, framed, run: current, agents, task, rightWidth, steer } = ctx
-  // 插话框不在了（任务结束、进入验收、换了 agent）就忘掉光标在它上面，免得下一次 ↑ 被误改道。
-  ctx.callbacks.clearSteerFocus(steer)
-  const leftCells = renderLeftColumn(ctx)
-  const { rightCells, rightTitle } = task
-    ? renderAgentDetail(ctx, current, agents, task, rightWidth, steer)
-    : renderAgentRows(ctx)
-  const { body, height } = renderColumns(ctx, leftCells, rightCells, rightTitle)
-  const { others, othersNote } = otherRuns(ctx, run)
-  const { head, foot, stop } = flowHeadAndFoot(ctx, othersNote)
-  // 只剩一行内容时，两栏改画当前阶段与全部 agent 的摘要；没有标题行时名称放在最前。
-  if (ctx.rows <= 1) return renderCompactFlow(ctx, head, stop, others, othersNote)
-  return shell(ctx, PURPLE, columns, head, body, height + (framed ? 2 : 0), foot)
+// 还没有派过任务（用户自己 /flow 打开）：名字一行，提示和关闭键一行
+function renderEmpty(ctx: ViewContext) {
+  const { Box, Text, Button, width, maxRows, callbacks } = ctx
+  const rows = [<Box width={width}><Text bold color={isVertical(ctx) ? undefined : ACCENT}>Codex</Text></Box>]
+  if (maxRows >= 2) rows.push(
+    <Box width={width}>
+      {text(ctx, '本会话还没有派出 Codex 任务。', MUTED)}
+      {ctx.canHide ? [text(ctx, ' · ', MUTED), <Button plain dimColor hotkey="q" key="hide" label="关闭" onPress={() => callbacks.pressHide()} />] : null}
+    </Box>,
+  )
+  return { tree: <Box flexDirection="column" width={width}>{maxRows >= 1 ? rows : []}</Box>, sizes: sameSize(1) }
 }
 
-function renderCompactFlow(ctx: FlowContext, head: Head, stop: string | null, others: FlowRun[], othersNote: string) {
-  const { Box, Text, spinner, columns, showTitle } = ctx
-  const { run, phase, agents, level } = ctx
-  // 一行摘要用满可用宽度，名称、模型和 token 才放得下
-  const lineWidth = columns
-  const p = run.phases.find(x => x.title === phase)
-  const nodes: RenderElement[] = []
-  let used = 0
-  const put = (node: RenderElement, w: number) => {
-    nodes.push(node)
-    used += w
-  }
-  const putDim = (text: string) => {
-    nodes.push(...dimFast(ctx, text))
-    used += cells(text)
-  }
-  if (!showTitle) {
-    const name = fit(run.name, Math.max(4, Math.floor(lineWidth / 3)))
-    put(<Text bold color={PURPLE}>{name}</Text>, cells(name))
-    put(<Text>  </Text>, 2)
-  }
-  if (p) {
-    const text = ` ${fit(p.title, 12)} ${doneOf(agents)}/${agents.length}`
-    put(mark(ctx, p.status, spinner), 1)
-    put(<Text color={p.status === 'running' ? BLUE : undefined}>{text}</Text>, cells(text))
-    put(<Text dimColor> │ </Text>, 3)
-  }
-  // 行尾：这个阶段的 agent 用同一个模型和 effort 时写一次，不同时写在各自名称后；
-  // 没有标题行时再写总 token 和总时长。放不下时依次省掉时长、模型、token，agent 名称优先
-  const models = [...new Set(agents.map(modelText))]
-  const shared = models.length === 1 ? models[0]! : ''
-  const total = tokensOf(run.tasks)
-  const tail = [shared, !showTitle && total ? `${formatTokens(total)} tok` : '', !showTitle ? formatDuration(run.seconds) : '']
-  const tailText = () => tail.filter(Boolean).map(s => ` · ${s}`).join('')
-  // 别的任务提示不省：一行摘要里只有它能看出还有别的任务
-  const note = othersNote ? ` │ ${othersNote}` : ''
-  for (const drop of [2, 0, 1]) if (used + 12 + cells(note) + cells(tailText()) > lineWidth) tail[drop] = ''
-  const room = lineWidth - cells(note) - cells(tailText())
-  used = appendCompactAgents(ctx, nodes, used, room, shared)
-  if (tailText()) putDim(tailText())
-  if (note) put(<Text color={CYAN}>{note}</Text>, cells(note))
-  // 摘要里没有可选项，不写操作提示（原因写在 README）；停止键只留阶段栏的「停止整个 flow」，免得停掉看不见的 agent。
-  // 有别的任务时留返回键，直接回列表（摘要里各层画得一样，逐层退看不出变化）
-  const compact: Foot = { hints: [], stop: level === 'phases' ? stop : null, canBack: others.length > 0, back: '返回列表', toList: true }
-  return shell(ctx, PURPLE, lineWidth, head, <Box width={lineWidth}>{nodes}</Box>, 1, compact)
-}
-
-function appendCompactAgents(ctx: FlowContext, nodes: RenderElement[], used: number, room: number, shared: string) {
-  const { Text, agents } = ctx
-  const put = (node: RenderElement, width: number) => {
-    nodes.push(node)
-    used += width
-  }
-  const putDim = (text: string) => {
-    nodes.push(...dimFast(ctx, text))
-    used += cells(text)
-  }
-  for (let i = 0; i < agents.length; i++) {
-    const t = agents[i]!
-    const label = fit(t.label, 16)
-    const own = shared ? '' : ` ${modelText(t)}`
-    const piece = (i ? 2 : 0) + 2 + cells(label) + cells(own)
-    const rest = agents.length - i
-    const reserve = rest > 1 ? cells(` +${rest - 1}`) : 0
-    if (used + piece + reserve > room) {
-      put(<Text dimColor>{` +${rest}`}</Text>, cells(` +${rest}`))
-      break
-    }
-    if (i) put(<Text>  </Text>, 2)
-    put(mark(ctx, t.status), 1)
-    put(<Text dimColor={t.status === 'running' ? undefined : true}>{` ${label}`}</Text>, 1 + cells(label))
-    if (own) putDim(own)
-  }
-  return used
+// 返回画好的树和各列的行数（焦点和翻页事件按它算窗口）
+export function drawPanel(ctx: ViewContext): { tree: RenderElement; sizes: WindowStarts } {
+  const { run, at } = ctx
+  if (!run) return renderEmpty(ctx)
+  if (isVertical(ctx)) return drawVertical(ctx)
+  const head = headOf(ctx, run)
+  const task = at.level === 'agent' ? tasksOf(run, at.phase ?? defaultPhase(run)).find(t => t.label === at.label) : undefined
+  const view = task ? renderDetail(ctx, run, task, head) : renderColumns(ctx, run, head)
+  return { tree: view.tree, sizes: sameSize(view.size) }
 }

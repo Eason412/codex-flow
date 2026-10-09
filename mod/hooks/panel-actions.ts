@@ -1,7 +1,7 @@
 // 面板层级、窗口与自动显示的状态变更；atom、队列和实际焦点仍由入口持有。
 import type { FlowRun, FlowTask, Nav, PanelRecord, WindowColumn, WindowStarts } from '../types'
 import { tasksOf } from './format'
-import { RECENT, TOP, listedRuns, entry, defaultPhase, up, columnKeys, windowStart, runKey, phaseKey, taskKey, detailKey, isItem, canSteer, steerKey } from './navigation'
+import { RECENT, listedRuns, entry, defaultPhase, up, columnKeys, windowStart, leftItems, leftKey, taskKey, detailKey, isItem, canSteer, steerKey, verticalLeft } from './navigation'
 
 export type ActionContext = {
   readSteerRound: () => Promise<number>
@@ -21,7 +21,9 @@ export type ActionContext = {
   readOpened: () => Promise<string[]>
   updateOpened: (change: (value: string[]) => string[]) => Promise<string[]>
   emptyWindows: WindowStarts
-  windowSize: number
+  // 各列当前画出的行数（竖排版面里阶段和 agent 上下叠着，各占一部分）；vertical：画的是竖排版面，没有左右栏
+  windowSize: WindowStarts
+  vertical: boolean
   focusOn: (key: string | null) => Promise<void>
   loadResult: (run: FlowRun, task: FlowTask) => Promise<string | null>
   clearRing: () => void
@@ -72,7 +74,7 @@ export async function moveTo(ctx: ActionContext, to: Nav) {
     await ctx.updateWindows(() => ({ ...ctx.emptyWindows }))
     await ctx.updateFocused(() => null)
   } else if (before.phase !== to.phase) {
-    // 同一个 flow 换阶段只清 agent 窗口；阶段窗口由 syncWindows 最小幅度校正。
+    // 同一个运行换阶段只清 agent 窗口；左栏窗口由 syncWindows 最小幅度校正。
     await ctx.updateWindows(old => ({ ...old, agents: 0, detailAgents: 0 }))
     await ctx.updateFocused(() => null)
   }
@@ -88,15 +90,16 @@ export async function syncWindows(ctx: ActionContext) {
   const hot = await ctx.readFocused()
   const phase = run ? at.phase ?? defaultPhase(run) : null
   const agents = run ? tasksOf(run, phase) : []
-  const phaseIndex = run?.phases.findIndex(p => p.title === phase) ?? -1
+  const shown = listedRuns(list, await ctx.readKept(), at.runId)
+  const left = ctx.vertical ? verticalLeft(shown, at).keys : leftItems(shown, run).map(item => item.key)
+  const selected = ctx.vertical ? verticalLeft(shown, at).selected : run ? leftKey(shown, run, phase) : ''
+  const leftIndex = left.indexOf(hot && left.includes(hot) ? hot : selected ?? '')
   const runningIndex = agents.findIndex(t => t.status === 'running')
   const hotIndex = run ? agents.findIndex(t => taskKey(run.runId, t.label) === hot) : -1
-  const listedCount = listedRuns(list, await ctx.readKept(), at.runId).length
   await ctx.updateWindows(old => ({
-    runs: windowStart(old.runs, listedCount, ctx.windowSize),
-    phases: windowStart(old.phases, run?.phases.length ?? 0, ctx.windowSize, phaseIndex),
-    agents: windowStart(old.agents, agents.length, ctx.windowSize, at.level === 'agents' ? hotIndex : runningIndex),
-    detailAgents: windowStart(old.detailAgents, agents.length, ctx.windowSize, agents.findIndex(t => t.label === at.label)),
+    left: windowStart(old.left, left.length, ctx.windowSize.left, leftIndex),
+    agents: windowStart(old.agents, agents.length, ctx.windowSize.agents, at.level === 'agents' ? hotIndex : runningIndex),
+    detailAgents: windowStart(old.detailAgents, agents.length, ctx.windowSize.detailAgents, agents.findIndex(t => t.label === at.label)),
   }))
 }
 
@@ -104,18 +107,26 @@ export async function revealFocus(ctx: ActionContext, key: string) {
   const list = await ctx.readRuns()
   const at = await ctx.readNav()
   for (const column of Object.keys(ctx.emptyWindows) as WindowColumn[]) {
-    const keys = columnKeys(listedRuns(list, await ctx.readKept(), at.runId), at, column)
+    const keys = columnKeys(listedRuns(list, await ctx.readKept(), at.runId), at, column, ctx.vertical)
     const index = keys.indexOf(key)
     if (index < 0) continue
-    await ctx.updateWindows(old => ({ ...old, [column]: windowStart(old[column], keys.length, ctx.windowSize, index) }))
+    await ctx.updateWindows(old => ({ ...old, [column]: windowStart(old[column], keys.length, ctx.windowSize[column], index) }))
   }
 }
 
-// 光标落到阶段就切到阶段栏并换右栏，落到 agent 就是 agent 栏；落到按钮、插话框时不动，x 停的仍是上一个条目
+// 光标落到左栏的运行或阶段就选中它、换右栏，落到 agent 就是在右栏；落到按钮、插话框时不动，x 停的仍是上一个条目
 export async function trackFocus(ctx: ActionContext, key: string) {
   if (!isItem(key)) return
   const at = await ctx.readNav()
-  if (key.startsWith('p:') && (at.level === 'phases' || at.level === 'agents')) await moveTo(ctx, { ...at, level: 'phases' as const, phase: key.slice(2) })
+  const columns = at.level === 'phases' || at.level === 'agents'
+  const run = key.startsWith('r:') ? (await listed(ctx)).find(r => r.runId === key.slice(2)) : undefined
+  if (run && columns) {
+    const same = run.runId === at.runId
+    await moveTo(ctx, { runId: run.runId, level: 'phases' as const, phase: same ? at.phase : defaultPhase(run), label: null, text: null })
+  } else if (key.startsWith('p:') && columns) {
+    // 竖排版面里几个运行时 level 为 agents 表示已进了某个运行的页面，换阶段不能退回列表
+    await moveTo(ctx, { ...at, level: ctx.vertical && at.level === 'agents' ? 'agents' as const : 'phases' as const, phase: key.slice(2) })
+  }
   else if (key.startsWith('t:') && at.level === 'phases') await ctx.updateNav(n => ({ ...n, level: 'agents' as const }))
   await ctx.updateFocused(() => key)
   await revealFocus(ctx, key)
@@ -128,15 +139,18 @@ export async function trackFocus(ctx: ActionContext, key: string) {
 
 export async function shiftWindow(ctx: ActionContext, column: WindowColumn, direction: 'up' | 'down') {
   const at = await ctx.readNav()
-  const keys = columnKeys(await listed(ctx), at, column)
+  const keys = columnKeys(await listed(ctx), at, column, ctx.vertical)
   if (!keys.length) return
   const hot = await ctx.readFocused()
-  const preferred = keys.includes(hot ?? '') ? hot : column === 'phases' && at.phase ? phaseKey(at.phase) : column === 'detailAgents' && at.label ? detailKey(at.runId ?? '', at.label) : null
+  const run = (await listed(ctx)).find(r => r.runId === at.runId)
+  const left = ctx.vertical ? verticalLeft(await listed(ctx), at).selected : run ? leftKey(await listed(ctx), run, at.phase) : null
+  const preferred = keys.includes(hot ?? '') ? hot : column === 'left' && left ? left : column === 'detailAgents' && at.label ? detailKey(at.runId ?? '', at.label) : null
   // resize 后 state 可能还是上次尺寸的起点，先按当前绘制窗口校正再移动一格。
-  const old = windowStart((await ctx.readWindows())[column], keys.length, ctx.windowSize, keys.indexOf(preferred ?? ''))
-  const start = windowStart(old + (direction === 'up' ? -1 : 1), keys.length, ctx.windowSize)
+  const size = ctx.windowSize[column]
+  const old = windowStart((await ctx.readWindows())[column], keys.length, size, keys.indexOf(preferred ?? ''))
+  const start = windowStart(old + (direction === 'up' ? -1 : 1), keys.length, size)
   if (start === old) return
-  const key = keys[direction === 'up' ? start : Math.min(keys.length - 1, start + ctx.windowSize - 1)]!
+  const key = keys[direction === 'up' ? start : Math.min(keys.length - 1, start + size - 1)]!
   // 引擎不会重入当前 ui.focus 钩子，翻页自己同步阶段/详情，再请求实际移动光标。
   await trackFocus(ctx, key)
   await ctx.updateWindows(w => ({ ...w, [column]: start }))
@@ -144,48 +158,40 @@ export async function shiftWindow(ctx: ActionContext, column: WindowColumn, dire
 }
 
 export async function goBack(ctx: ActionContext) {
-  const back = up(await listed(ctx), await ctx.readNav())
+  const back = up(await listed(ctx), await ctx.readNav(), ctx.vertical)
   if (!back) return
   await moveTo(ctx, back.to)
   await ctx.focusOn(back.key)
 }
 
-// 一行摘要里各层画得一样，返回直接回任务列表，光标停在刚才看的那个任务上
-export async function goList(ctx: ActionContext) {
-  const runId = (await ctx.readNav()).runId
-  await moveTo(ctx, TOP)
-  await ctx.focusOn(runId ? runKey(runId) : null)
-}
-
 // 打开某个 agent 的详情，结果文本读出来放进 nav
-export async function showAgent(ctx: ActionContext, run: FlowRun, task: FlowTask) {
+export async function showAgent(ctx: ActionContext, run: FlowRun, task: FlowTask, level: Nav['level'] = 'agent') {
   await ctx.updateFocused(() => detailKey(run.runId, task.label))
-  await ctx.updateNav(n => ({ ...n, level: 'agent' as const, label: task.label, text: null }))
+  await ctx.updateNav(n => ({ ...n, level, label: task.label, text: null }))
   const text = await ctx.loadResult(run, task)
   await ctx.updateNav(n => (n.runId === run.runId && n.label === task.label ? { ...n, text } : n))
 }
 
+// 左栏的运行或阶段上按 Enter：选中它，光标进右栏的第一个 agent
 export async function openRun(ctx: ActionContext, r: FlowRun) {
-  const phase = defaultPhase(r)
-  const first = tasksOf(r, phase)[0]
-  // 单个 agent 直接看详情
-  if (r.kind === 'single' && first) {
-    await moveTo(ctx, { runId: r.runId, level: 'agent' as const, phase, label: first.label, text: null })
-    return showAgent(ctx, r, first)
-  }
-  await moveTo(ctx, { runId: r.runId, level: 'phases' as const, phase, label: null, text: null })
-  await ctx.focusOn(phase ? phaseKey(phase) : null)
+  const at = await ctx.readNav()
+  await selectPhase(ctx, r, at.runId === r.runId && at.phase ? at.phase : defaultPhase(r))
 }
 
-export async function selectPhase(ctx: ActionContext, run: FlowRun, title: string) {
+export async function selectPhase(ctx: ActionContext, run: FlowRun, title: string | null) {
   const first = tasksOf(run, title)[0]
-  await moveTo(ctx, { ...await ctx.readNav(), level: 'agents' as const, phase: title, label: null, text: null })
-  if (first) await ctx.focusOn(taskKey(run.runId, first.label))
+  await moveTo(ctx, { runId: run.runId, level: 'agents' as const, phase: title, label: null, text: null })
+  // 竖排版面里单发 agent 的页面直接画它的结果：不分层，label 只用来读结果文本；页面上没有 agent 行可以聚焦，光标落到返回键
+  if (ctx.vertical && run.kind === 'single' && first) {
+    await showAgent(ctx, run, first, 'agents')
+    await ctx.focusOn('back')
+  } else if (first) await ctx.focusOn(taskKey(run.runId, first.label))
 }
 
 export async function selectAgent(ctx: ActionContext, run: FlowRun, t: FlowTask) {
   await showAgent(ctx, run, t)
-  await ctx.focusOn(detailKey(run.runId, t.label))
+  // 竖排版面的详情页没有 agent 列表，光标落到返回键
+  await ctx.focusOn(ctx.vertical ? 'back' : detailKey(run.runId, t.label))
 }
 
 export async function selectDetail(ctx: ActionContext, run: FlowRun, t: FlowTask) {
@@ -199,3 +205,29 @@ export async function selectDetail(ctx: ActionContext, run: FlowRun, t: FlowTask
   await selectAgent(ctx, run, t)
 }
 
+
+// 翻页提示画在下边线上，按树序不在栏的上下两端；光标从一栏可见的最后一项往外走、下面还有时改成往下翻一项，
+// 从可见的第一项往外走、上面还有时往上翻。只有一项可见时按落点分方向：左栏落到右栏、右栏落到左栏以外的都算往下。
+export async function pageRedirect(ctx: ActionContext, from: string | null, to: string) {
+  if (!from) return null
+  const at = await ctx.readNav()
+  const list = await listed(ctx)
+  const windows = await ctx.readWindows()
+  for (const column of Object.keys(ctx.emptyWindows) as WindowColumn[]) {
+    const keys = columnKeys(list, at, column, ctx.vertical)
+    const index = keys.indexOf(from)
+    if (index < 0 || keys.includes(to)) continue
+    // 竖排版面里展开阶段的 agent 紧接在它的阶段行下面，从阶段行往下走进 agent 不是翻页
+    if (ctx.vertical && column === 'left' && columnKeys(list, at, 'agents', true).includes(to)) return null
+    const start = windowStart(windows[column], keys.length, ctx.windowSize[column])
+    const last = Math.min(keys.length, start + ctx.windowSize[column]) - 1
+    const below = index === last && last < keys.length - 1
+    const above = index === start && start > 0
+    if (!below && !above) return null
+    // 竖排版面：agent 之前只有它自己的阶段行（及更上面的阶段）；往这些走是往上翻，其余（后面的阶段、翻页键、按钮）是往下翻
+    const left = columnKeys(list, at, 'left', ctx.vertical)
+    const next = ctx.vertical && column === 'agents' ? !(left.includes(to) && left.indexOf(to) <= left.indexOf(verticalLeft(list, at).selected ?? '')) : column === 'agents' ? !left.includes(to) : column === 'left' ? columnKeys(list, at, 'agents', ctx.vertical).includes(to) || to.startsWith('more:left:') : to.startsWith('steer:') || to.startsWith(`more:${column}:`)
+    return `more:${column}:${below && (!above || next) ? 'down' : 'up'}`
+  }
+  return null
+}

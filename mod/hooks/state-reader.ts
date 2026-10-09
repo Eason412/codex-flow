@@ -34,6 +34,11 @@ function toTask(t: any, status: string, now: number): FlowTask {
     // 执行器在验收中被杀时 checking 会留下；只在任务仍运行时算数
     checking: t.checking === true && t.status === 'running' && status !== 'lost',
     turnEnded: t.turnEnded === true,
+    checks: Array.isArray(t.checks) ? t.checks.length : 0,
+    checksPassed: Array.isArray(t.checkResults)
+      ? t.checkResults.filter((r: any) => r && r.code === 0 && !r.reason).length
+      : null,
+    checkFailed: t.checkFailed === true,
   }
 }
 

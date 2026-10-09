@@ -23,6 +23,11 @@ export type FlowTask = {
   checking: boolean
   // 这一轮 Codex 已结束（之后可能还在验收）：插话不会再被取走
   turnEnded: boolean
+  // 验收命令条数（没有为 0）；通过的条数取 checkResults 里退出码为 0 的，没有记录时为 null
+  checks: number
+  checksPassed: number | null
+  // 失败是因为验收没过（执行器的 checkFailed）
+  checkFailed: boolean
 }
 
 export type FlowRun = {
@@ -40,7 +45,10 @@ export type FlowRun = {
   tasks: FlowTask[]
 }
 
-// 面板在哪一层：level 为空是当前任务的列表；phases 是在左栏选阶段，agents 是在右栏选 agent，agent 是某个 agent 的详情（text 是读出来的结果）
+// 面板在哪一层：runId 是选中的运行，phase 是右栏列出的阶段；level 为 phases 时光标在左栏（运行、阶段），agents 在右栏选 agent，
+// agent 是某个 agent 的详情（text 是读出来的结果）；还没有任何运行时 level 为空。
+// 竖排版面（非终端）没有左右栏：几个运行时 phases 是任务列表，agents 是进了某个运行的页面，agent 是 flow 里某个 agent 的详情；
+// 单发 agent 的页面 label 只用来读结果文本，level 仍是 phases（只有一个运行）或 agents
 export type Nav = {
   runId: string | null
   level: 'phases' | 'agents' | 'agent' | null
@@ -64,7 +72,8 @@ export type PanelRecord = {
   } | null
 }
 
-export type WindowColumn = 'runs' | 'phases' | 'agents' | 'detailAgents'
+// 左栏（阶段，或多个运行时的运行与选中 flow 的阶段）、右栏 agent、详情左栏的 agent
+export type WindowColumn = 'left' | 'agents' | 'detailAgents'
 export type WindowStarts = Record<WindowColumn, number>
 
 declare module 'claude-code' {
