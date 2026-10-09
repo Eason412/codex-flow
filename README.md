@@ -138,6 +138,7 @@ Claude Code 主对话
 | `flow/codex-flow.mjs cancel <runId> [任务名]` | 停止整个 flow 或其中一个任务 |
 | `flow/codex-flow.mjs steer <runId> <任务名> "<内容>"` | 向运行中的任务追加指示 |
 | `flow/codex-flow.mjs watch <runId> [--alert-after 秒]` | 等到运行结束并打印汇总；给出 `--alert-after` 时任务跑满该时长就提前退出 |
+| `flow/codex-flow.mjs verdict <runId> [任务名] used\|partial\|unused ["原因"]` | 验收后记下结果是否用上，和计划的拆分理由、模型来源一起留在 `history.jsonl` 供复盘 |
 | `flow/codex-flow.mjs history --backfill` | 把尚未记录的运行补进长期摘要 `history.jsonl` |
 
 `.mjs` 命令用 `node` 运行，路径相对于 `~/.claude/skills/codex`。计划字段的完整说明见 [docs/flow-plan.md](docs/flow-plan.md)。

@@ -7,12 +7,12 @@
 下面的示例只演示字段写法，对应上表前三行的组合：两件独立的事并行，只有新行为配黑盒验证。
 
 ```json
-{"name": "skills", "cwd": "/path/to/repo",
+{"name": "skills", "cwd": "/path/to/repo", "why": "导出和拆分互不调用，并行；导出是新行为，配黑盒验证",
  "phases": [
-   {"title": "实现", "tasks": [
-     {"label": "导出", "model": "gpt-6.1-sol", "effort": "high", "promptFile": "export.md", "writes": ["skills/export"], "checks": ["cd skills/export && uv run python -m unittest"]},
+   {"title": "实现导出与拆分", "tasks": [
+     {"label": "导出", "model": "gpt-6.1-sol", "effort": "high", "pick": "default", "promptFile": "export.md", "writes": ["skills/export"], "checks": ["cd skills/export && uv run python -m unittest"]},
      {"label": "拆分", "model": "gpt-6.1-sol", "effort": "high", "promptFile": "split.md", "writes": ["skills/fetch"], "checks": ["cd skills/fetch && uv run python -m unittest", "uv run compare_behavior.py"]}]},
-   {"title": "验证", "tasks": [
+   {"title": "验证导出", "tasks": [
      {"label": "导出验证", "model": "gpt-6.1-sol", "effort": "high", "schema": "review", "after": ["导出"], "writes": [], "prompt": "{{file:export-spec.md}}\n按规格逐条黑盒验证，跑完整测试，自己构造反例。实现者的回复：\n{{task:导出}}"}]}]}
 ```
 
@@ -27,6 +27,8 @@
 - 写入核对只报告、不改任务状态，失败或被停掉的任务也核对：Codex 改文件记录里范围外的路径记为「越界写入」，这是唯一能确定归属的依据；同一时段 git 工作区里范围外、没有任务认领的变动记为「范围外变动，来源未定」，多半是 shell 命令写的，几个任务同时在一个仓库里写或跑验收时也可能来自别的任务。
 - 并行写入（依据：Claude Code agent teams 文档要求按文件划分归属；33,596 个 agent PR 的冲突研究：worktree 只把冲突推迟到合并时，按文件划分、逐个合并、尽早检测才减少冲突；Claude Workflow 也是编排者按文件拆、要接力的按顺序跑）：写了非空 `writes` 的任务，范围和正在运行的任务重叠时自动排队，等前者结束再开跑，效果等于加了 `after`，开始时在 stderr 提示哪几对会依次运行；判断重叠时 glob 按通配符之前的目录算（`src/*.js` 和 `src/sub/x.js` 也算重叠），宁可多排队；排队只在同一个 flow 内，两个 flow 同时改同一仓库互不知道；排队中的任务可以用 cancel 停掉；`[]` 和没写 `writes` 的任务不排队。没写 `writes` 的任务范围不明，照常并行，和有写入范围的任务在同一目录时开始提示一行，能写就写上。声明不准时，两个同时运行的任务在改文件记录里改了同一个文件，汇总两边各记一行「和「X」同时改了」，不自动重新验收：由我判断要不要重跑先结束的那个（它验收时还没看到对方的改动）；shell 命令写的文件没有归属记录，查不到。
 - 验收全部退出码为 0 才算完成；失败或超时（默认 10 分钟，环境变量 `CODEX_FLOW_CHECK_TIMEOUT` 按秒改，超时后先 SIGTERM、3 秒后强制结束，命令留下的后台进程一并结束）记为失败，保留结果，下游按前置未完成处理。输出在运行目录的 `logs/<任务>.checks.log`。续跑时，验收失败或改了 `checks` 的任务复用 Codex 结果、只重跑验收，已完成的下游沿用原结果；只改 `writes` 不重跑，越界记录按新范围重筛。
+- `why`（可选，计划顶层）：一句拆分理由；`pick`（可选，任务上）：`default`、`user`、`claude`，模型是照分工表、用户指定还是我自己判断选的。两者都进 `history.jsonl`；pick 写错拒绝启动。阶段标题只有动作（「实现」「核对」等）或写了模型名时，开跑时在 stderr 提示一行，不阻止。
+- 验收结论：`codex-flow.mjs verdict <runId> [任务名] used|partial|unused ["原因"]` 追加一行 `{"type":"verdict",...}` 到 `history.jsonl`；partial 和 unused 必须写原因，任务名必须在这次运行里，运行目录清理后按 history 里的记录核对。同一任务记多次以最后一次为准。
 - `label` 在整个计划里唯一，会显示给用户，用简短中文名；`brief` 可选，是 `/flow` 详情页里的一句话说明；`schema` 用内置的 `review` / `opinion` / `result` 或 schema 文件路径。模型和 effort 照上面的分工表，只能用 `models.json` 里的。
 - 结束时会收到后台任务通知。读输出里的汇总（也在运行目录的 `summary.txt`）：每个任务下有验收结果、越界和碰撞提醒、续跑过期提示和三行以内的结论，schema 结果写判断、问题数和 summary，md 结果取正文第一段；不用 schema 的任务在 prompt 里要求回复先用三行以内写结论。需要细看时再按结果路径读；汇总里出现「⚠ 实际模型」要告诉用户。
 - 停整个 flow：用户在 Background 里按 x，或我用 TaskStop。停单个任务：用户在 `/flow` 面板按 x，或 `codex-flow.mjs cancel <runId> <label>`。中途补充要求：`codex-flow.mjs steer <runId> <label> "<内容>"`；用户让我转告某个运行中的 Codex 时也用它。用户也可以在面板 agent 详情的插话框里直接发，送达或被拒都记在该任务 state 的 `recent` 里（面板「过程」区）。Codex 一结束（`turnEnded`，之后可能还在验收 `checking`）就不再取插话，之后写进来的改名为 `.unsent` 并在过程里注明「插话没有送达」。看进度：`codex-flow.mjs status [runId]`。

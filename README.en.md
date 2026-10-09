@@ -138,6 +138,7 @@ Have an agent read [SETUP.md](SETUP.md) and follow its steps for installation, c
 | `flow/codex-flow.mjs cancel <runId> [task]` | Stop the whole flow or one task |
 | `flow/codex-flow.mjs steer <runId> <task> "<text>"` | Add instructions to a running task |
 | `flow/codex-flow.mjs watch <runId> [--alert-after seconds]` | Wait until the run ends and print its summary; with `--alert-after`, exit early once a task reaches that duration |
+| `flow/codex-flow.mjs verdict <runId> [task] used\|partial\|unused ["reason"]` | Record after review whether the result was used, kept in `history.jsonl` with the plan's split rationale and model source for later review |
 | `flow/codex-flow.mjs history --backfill` | Add runs not yet recorded to the long-term summary `history.jsonl` |
 
 Run the `.mjs` commands with `node`; paths are relative to `~/.claude/skills/codex`. All plan fields are described in [docs/flow-plan.md](docs/flow-plan.md) (Chinese).
