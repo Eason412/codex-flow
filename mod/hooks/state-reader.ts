@@ -43,17 +43,19 @@ function toTask(t: any, status: string, now: number): FlowTask {
 }
 
 function toRun(dir: string, state: any, now: number, alive: Set<number>, lostSince: Map<string, number>): FlowRun {
+  const round = `${state.runId}:${state.startedAt}`
   const status = state.status === 'running' && !alive.has(state.pid) ? 'lost' : String(state.status)
-  if (status !== 'lost') lostSince.delete(state.runId)
+  if (status !== 'lost') lostSince.delete(round)
   let endedSeconds: number | null = null
   // 保留小数：显示耗时可以四舍五入，RECENT 的截止时间不能提前半秒。
   if (state.endedAt) endedSeconds = Math.max(0, (now - Date.parse(state.endedAt)) / 1000)
   else if (status === 'lost') {
-    if (!lostSince.has(state.runId)) lostSince.set(state.runId, now)
-    endedSeconds = Math.max(0, (now - (lostSince.get(state.runId) ?? now)) / 1000)
+    if (!lostSince.has(round)) lostSince.set(round, now)
+    endedSeconds = Math.max(0, (now - (lostSince.get(round) ?? now)) / 1000)
   }
   return {
     runId: String(state.runId),
+    startedAt: state.startedAt,
     dir,
     kind: state.kind === 'single' ? 'single' : 'flow',
     name: String(state.name),
@@ -86,7 +88,7 @@ function validState(state: any) {
 
 export type ReaderContext = {
   root: string
-  session: string
+  sessions: string[]
   now: number
   otherSession: Map<string, number>
   goodStates: Map<string, any>
@@ -170,7 +172,7 @@ async function scanStates(ctx: ReaderContext, entries: { name: string; kind: str
       state = ctx.goodStates.get(dir)
       if (!state) continue
     }
-    if (state.session !== ctx.session) {
+    if (!ctx.sessions.includes(state.session)) {
       if (TERMINAL.has(state.status)) {
         const mtime = await ctx.stateMtime(dir)
         if (mtime !== null) ctx.otherSession.set(dir, mtime)

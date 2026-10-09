@@ -210,8 +210,8 @@ function drawFlow(ctx: ViewContext, run: FlowRun): Drawn {
   const phaseWin = windowed(run.phases, starts.left, split.phases, run.phases.findIndex(p => p.title === phase))
   const keys = agents.map(t => taskKey(run.runId, t.label))
   const preferred = at.level === 'agents' && hot && keys.includes(hot) ? keys.indexOf(hot) : agents.findIndex(t => t.status === 'running')
-  const agentWin = windowed(agents, starts.agents, Math.max(1, split.agents), preferred)
-  const agentItems = agentWin.items.slice(0, split.agents)
+  const agentWin = split.agents > 0 && maxRows >= 3 ? windowed(agents, starts.agents, split.agents, preferred) : null
+  const agentItems = agentWin?.items ?? []
 
   // 列宽按这个 flow 的全部 agent 定，换阶段、翻页时不跳。名字格要给按钮自带的左右内边距留出约 4 列
   const avail = innerWidth(ctx) - 2 - 2 - TIME_SLOT
@@ -240,17 +240,17 @@ function drawFlow(ctx: ViewContext, run: FlowRun): Drawn {
     return (
       <Box flexDirection="column" width={ctx.width} marginX={-PAD} paddingX={PAD} backgroundColor={OPEN_BG}>
         {row}
-        {agents.length ? agentItems.map(agentRow) : [note(ctx, 2, '这个阶段没有 agent', SECOND)]}
+        {split.agents > 0 ? (agents.length ? agentItems.map(agentRow) : [note(ctx, 2, '这个阶段没有 agent', SECOND)]) : null}
       </Box>
     )
   }
   const phasePager = pagerOf('left', phaseWin)
-  const agentPager = pagerOf('agents', agentWin)
+  const agentPager = agentWin ? pagerOf('agents', agentWin) : null
   return shell(ctx, [
     header(ctx, run.name, statsTotal([run])),
     ...(maxRows >= 3 ? (run.phases.length ? phaseWin.items.map(phaseRow) : [note(ctx, 0, '还没有阶段', SECOND)]) : []),
     maxRows >= 2 ? footer(ctx, 'flow', [...(phasePager ? [{ label: '阶段 ', pager: phasePager }] : []), ...(agentPager ? [{ label: 'agent ', pager: agentPager }] : [])]) : null,
-  ], { left: split.phases, agents: Math.max(1, split.agents), detailAgents: 1 })
+  ], { left: maxRows >= 3 ? split.phases : 0, agents: agentWin ? split.agents : 0, detailAgents: 0 })
 }
 
 // ---- agent 详情与单发 agent ----

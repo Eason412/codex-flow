@@ -4,7 +4,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register, MatchedHook } from 'claude-code'
 import type { FlowRun, FlowTask, PanelRecord, WindowColumn, WindowStarts } from '../types'
 import { SPIN, AGENT_SPIN, SPIN_MS, breathPhase, fileSafe, formatDuration, tasksOf } from './format'
-import { TOP, currentRuns, listedRuns, entry, leftKey, runKey, taskKey, detailKey, isItem, canSteer, steerKey } from './navigation'
+import { TOP, currentRuns, listedRuns, entry, leftKey, runKey, taskKey, detailKey, isItem, canSteer, steerKey, runRound } from './navigation'
 import type { ActionContext } from './panel-actions'
 import { applyShown, autoShow, moveTo, syncWindows, revealFocus, trackFocus, shiftWindow, goBack, openRun, selectPhase, selectAgent, selectDetail, pageRedirect } from './panel-actions'
 import { readRunList, loadResult } from './state-reader'
@@ -19,6 +19,7 @@ const runs = atom({ plugin: 'codex-flow', key: 'runs' } as const, [] as FlowRun[
 const nav = atom({ plugin: 'codex-flow', key: 'nav' } as const, TOP)
 const focused = atom({ plugin: 'codex-flow', key: 'focused' } as const, null as string | null)
 const reminded = atom({ plugin: 'codex-flow', key: 'reminded' } as const, [] as string[])
+const sessions = atom({ plugin: 'codex-flow', key: 'sessions' } as const, [] as string[])
 // 主对话是否正在跑一轮：插件提交的提醒要等空闲才送达，在忙时先不提交，免得送到时任务已经结束
 const working = atom({ plugin: 'codex-flow', key: 'working' } as const, false)
 // 输入框上方是否显示面板：/flow 打开，全部结束后 q 关闭
@@ -33,6 +34,7 @@ const EMPTY_WINDOWS: WindowStarts = { left: 0, agents: 0, detailAgents: 0 }
 const windows = atom({ plugin: 'codex-flow', key: 'windows' } as const, EMPTY_WINDOWS)
 // 焦点事件沿用当前绘制的各列行数；各列起点保存在 $.state。
 let windowSize: WindowStarts = { left: 4, agents: 4, detailAgents: 4 }
+let pagerKeys = new Set<string>()
 // 当前画的是不是竖排版面（非终端）：导航、翻页和停止键的行为随之不同
 let vertical = false
 
@@ -68,7 +70,9 @@ const runsRoot = async ($: Engine) => `${await flowHome($)}/runs`
 async function alivePids($: Engine, pids: number[]) {
   if (!pids.length) return new Set<number>()
   try {
-    const { stdout } = await $.process.run(['ps', '-o', 'pid=', '-p', pids.join(',')])
+    const { exitCode, stdout, stderr } = await $.process.run(['ps', '-o', 'pid=', '-p', pids.join(',')])
+    // pid 都不存在时 ps 也非零退出，但没有 stderr；查询失败才按都还活着处理。
+    if (exitCode !== 0 && !stdout.trim() && stderr.trim()) return new Set(pids)
     return new Set(stdout.split('\n').map(s => Number(s.trim())).filter(Boolean))
   } catch {
     // 查不了进程时按都还活着处理，不误报“已退出”
@@ -88,16 +92,20 @@ async function stateMtime($: Engine, dir: string) {
   }
 }
 
-// fresh：/flow 打开时要自己读一遍，不用别的调用发起、可能已经过时的那次
+function logFailure($: Engine, event: string, error: unknown) {
+  $.ui.log(JSON.stringify({ event, source: { root: $.plugin.root, instance }, error: String(error) }), { to: 'debug' })
+}
+
 async function syncSpinner($: Engine) {
   const active = (await read($, shown)) && (await read($, runs)).some(r => r.status === 'running')
-  if (active && !spinTimer) spinTimer = $.clock.every(SPIN_MS, () => void update($, frame, n => (n + 1) % (SPIN.length * AGENT_SPIN.length)))
+  if (active && !spinTimer) spinTimer = $.clock.every(SPIN_MS, () => void update($, frame, n => (n + 1) % (SPIN.length * AGENT_SPIN.length)).catch(error => logFailure($, 'spinner-failed', error)))
   if (!active && spinTimer) {
     spinTimer.cancel()
     spinTimer = null
   }
 }
 
+// fresh：/flow 打开时要自己读一遍，不用别的调用发起、可能已经过时的那次
 async function refresh($: Engine, fresh = false) {
   if (inflight && !fresh) return inflight
   if (inflight) await inflight.catch(() => undefined)
@@ -108,13 +116,22 @@ async function refresh($: Engine, fresh = false) {
   return mine
 }
 
+async function rememberSession($: Engine, session: string) {
+  if (!(await read($, sessions)).includes(session)) {
+    await update($, sessions, old => old.includes(session) ? old : [...old, session])
+    // 曾被跳过的已结束记录可能属于这个新 ID，mtime 不变也要重新筛选。
+    otherSession.clear()
+  }
+}
+
 async function readRuns($: Engine) {
   const root = await runsRoot($)
   const session = await $.session.id()
+  await rememberSession($, session)
   const now = await $.clock.now()
   let reminderRuns: FlowRun[] = []
   const list = await readRunList({
-    root, session, now, otherSession, goodStates, reportedErrors, lostSince,
+    root, sessions: await read($, sessions), now, otherSession, goodStates, reportedErrors, lostSince,
     list: () => $.fs.list(root),
     exists: () => $.fs.exists(root),
     readText: path => readText($, path),
@@ -209,7 +226,7 @@ async function remind($: Engine, list: FlowRun[]) {
   const fresh: string[] = []
   for (const run of list) {
     if (run.status === 'lost') {
-      const key = `${run.runId}:lost`
+      const key = `${runRound(run)}:lost`
       if (busy || done.includes(key)) continue
       fresh.push(key)
       // state-reader 把快照中仍为 running 的任务转为 lost，其他任务状态保持原样。
@@ -229,7 +246,7 @@ async function remind($: Engine, list: FlowRun[]) {
     for (const task of run.tasks) {
       if (task.status !== 'running') continue
       const n = Math.floor(task.seconds / after)
-      const key = `${run.runId}:${task.label}:${n}`
+      const key = `${runRound(run)}:${task.label}:${n}`
       if (n < 1 || done.includes(key)) continue
       fresh.push(key)
       $.ui.toast(`Codex 任务「${task.label}」（${run.name}，${task.model} ${task.effort}）已运行 ${formatDuration(task.seconds)}。`)
@@ -237,7 +254,7 @@ async function remind($: Engine, list: FlowRun[]) {
   }
   if (fresh.length) await update($, reminded, old => {
     const all = [...old, ...fresh]
-    // 时长提醒只保留最近 200 条；失联键不淘汰，保证每个运行只进对话一次。
+    // 时长提醒只保留最近 200 条；失联键不淘汰，保证每轮只进对话一次。
     return [...all.filter(key => key.endsWith(':lost')), ...all.filter(key => !key.endsWith(':lost')).slice(-200)]
   })
 }
@@ -382,6 +399,9 @@ function actionContext($: Engine): ActionContext {
     get windowSize() {
       return windowSize
     },
+    get pagerKeys() {
+      return pagerKeys
+    },
     get vertical() {
       return vertical
     },
@@ -399,7 +419,7 @@ function actionContext($: Engine): ActionContext {
 
 function viewCallbacks($: Engine): ViewContext['callbacks'] {
   return {
-    shiftWindow: (column, direction) => shiftWindow(actionContext($), column, direction),
+    shiftWindow: async (column, direction) => { await shiftWindow(actionContext($), column, direction) },
     pressStop: () => pressStop($),
     goBack: () => goBack(actionContext($)),
     pressHide: () => pressHide($),
@@ -411,10 +431,12 @@ function viewCallbacks($: Engine): ViewContext['callbacks'] {
       if (!steer && ringAt?.startsWith('steer:')) ringAt = null
     },
     sendSteer: (runId, label, value) => void sendSteer($, runId, label, value),
+    pagerVisible: key => { pagerKeys.add(key) },
   }
 }
 
 const renderPanel: MatchedHook<'ui.render', { component: 'AbovePrompt' }> = async ($, e, next) => {
+  pagerKeys = new Set<string>()
   // 没打开、有问卷，或正在看子代理的对话时让出这块区域。
   if (!(await read($, shown)) || e.props.hasSurvey || e.props.view?.agentId) return next(e)
   bandId = e.requestId
@@ -465,12 +487,19 @@ const trackPanelFocus: MatchedHook<'ui.focus', { component: 'AbovePrompt' }> = a
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'flow', description: '打开 Codex 任务面板' })
+    await rememberSession($, await $.session.id())
     // 重载后让状态行和面板一致
     await changePanel($, async () => applyShown(actionContext($), await read($, shown), 'reload', await read($, auto)))
-    const tick = () => void refresh($).catch(() => undefined).then(() => syncSpinner($))
+    const tick = () => void refresh($).catch(error => logFailure($, 'refresh-failed', error))
+      .then(() => syncSpinner($)).catch(error => logFailure($, 'spinner-failed', error))
     $.clock.every(REFRESH_MS, tick)
     tick()
 
+    return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    await rememberSession($, e.sessionId)
     return next(e)
   })
 

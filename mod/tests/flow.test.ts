@@ -51,7 +51,7 @@ const PANEL = '/home/me/.claude/codex-flow/panel-sess-1.json'
 const PROPS = { hasSurvey: false, isWorking: false, maxRows: 24, bodyColumns: 100, scroll: { top: 0, bodyRows: 24, contentRows: 0 }, view: {} } as never
 const FLOW_CMD = { command: 'flow', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as const
 
-type World = { writes: string[]; prompts: string[]; toasts: string[]; logs: { text: string; to: string }[]; killed: string[][]; alive: number[]; files: Record<string, string>; mtimes: Record<string, number>; dirs: string[]; failList: boolean; rootExists: boolean; failReads: string[]; windowStarts: WindowStarts; focuses: string[]; failWrites?: RegExp; beforeManualAutoSet?: () => Promise<void>; beforePanelWrite?: (text: string) => Promise<void> }
+type World = { writes: string[]; prompts: string[]; toasts: string[]; logs: { text: string; to: string }[]; killed: string[][]; alive: number[]; files: Record<string, string>; mtimes: Record<string, number>; dirs: string[]; failList: boolean; rootExists: boolean; failReads: string[]; windowStarts: WindowStarts; focuses: string[]; landed: string[]; sessionId: string; failSessionId?: boolean; psError?: boolean; failWrites?: RegExp; beforeManualAutoSet?: () => Promise<void>; beforePanelWrite?: (text: string) => Promise<void> }
 
 function world(on: On, env: Record<string, string> = { HOME: '/home/me' }): World {
   const w: World = {
@@ -65,6 +65,8 @@ function world(on: On, env: Record<string, string> = { HOME: '/home/me' }): Worl
     rootExists: true,
     failReads: [],
     focuses: [],
+    landed: [],
+    sessionId: 'sess-1',
     windowStarts: { left: 0, agents: 0, detailAgents: 0 },
     dirs: ['r-0', 'r-1', 'r-2', 's-1'],
     mtimes: {},
@@ -78,10 +80,13 @@ function world(on: On, env: Record<string, string> = { HOME: '/home/me' }): Worl
   }
   mock.env(on, env)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.id', () => {
+    if (w.failSessionId) throw new Error('session id unavailable')
+    return { value: w.sessionId }
+  })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
-  on('ui.focus', () => ({}))
+  on('ui.focus', ($, e) => { if (e.element) w.landed.push(e.element); return {} })
   on('state.set', { plugin: 'codex-flow', key: 'windows' }, async ($, e, next) => {
     const result = await next(e)
     if (result.value?.isSet) w.windowStarts = e.value
@@ -131,7 +136,7 @@ function world(on: On, env: Record<string, string> = { HOME: '/home/me' }): Worl
     return { value: undefined }
   })
   on('process.run', ($, e) => {
-    if (e.argv[0] === 'ps') return { value: { exitCode: 0, stdout: w.alive.join('\n'), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (e.argv[0] === 'ps') return { value: { exitCode: w.psError || !w.alive.length ? 1 : 0, stdout: w.psError ? '' : w.alive.join('\n'), stderr: w.psError ? 'ps: Operation not permitted' : '', isStdoutTruncated: false, isStderrTruncated: false } }
     w.killed.push([...e.argv])
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -1744,5 +1749,294 @@ test('桌面端光标走阶段行只换展开的阶段，不退回列表；agent
   await ui.press({ key: 'back' })
   expect(await ui.find({ type: 'Text', text: 'Codex · 2 个任务' })).toBeDefined()
   expect(w.focuses.at(-1)).toBe('r:r-1')
+  await ui.unmount()
+})
+
+// ---- 审查回归：提醒轮次、会话延续与不可见控件 ----
+
+test('A 运行列表翻页后，聚焦窗口内另一个运行不改变窗口', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = Array.from({ length: 15 }, (_, i) => `single-${i}`)
+  for (const [i, id] of w.dirs.entries()) w.files[`${ROOT}/${id}/state.json`] = JSON.stringify({ ...singleState, runId: id, name: id, startedAt: iso(200 - i) })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await mountAt($, 'review-A')
+  const focus = personFocus($, 'review-A')
+  await focus('more:left:down')
+  await focus('more:left:down')
+  const visible = async () => (await ui.findAll({ type: 'Button', text: /^single-\d+$/ })).map(b => b.text)
+  expect(await visible()).toEqual(['single-2', 'single-3', 'single-4', 'single-5'])
+  await focus('r:single-3')
+  expect(w.windowStarts.left).toBe(2)
+  expect(await visible()).toEqual(['single-2', 'single-3', 'single-4', 'single-5'])
+  expect(await ui.find({ key: 't:single-3:单发测试' })).toBeDefined()
+  await clock.advance(2_000)
+  expect(await visible()).toEqual(['single-2', 'single-3', 'single-4', 'single-5'])
+  await ui.unmount()
+})
+
+for (const maxRows of [24, 3]) {
+  test(`B maxRows=${maxRows} 左栏翻页按钮未画出时，越过边界直接翻页并聚焦新项`, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 + 252_000 })
+    const w = world(on)
+    w.dirs = ['r-1']
+    const titles = 'abcdefghijkl'.split('')
+    w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState,
+      phases: titles.map((title, i) => ({ title, status: i === 0 ? 'running' : 'pending' })),
+      tasks: titles.map((phase, i) => ({ ...flowState.tasks[1]!, label: `agent-${i}`, phase })),
+    })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await clock.advance(2_000)
+    const id = `review-B-${maxRows}`
+    const ui = await mountAt($, id, maxRows)
+    const focus = personFocus($, id)
+    const size = maxRows === 3 ? 2 : 4
+    expect(await ui.find({ key: 'more:left:down' })).toBeUndefined()
+    await focus(`p:${titles[size - 1]}`)
+    await focus(`t:r-1:agent-${size - 1}`)
+    expect(w.landed.at(-1)).toBe(`p:${titles[size]}`)
+    expect(await ui.find({ key: w.landed.at(-1) })).toBeDefined()
+    expect(w.windowStarts.left).toBe(1)
+    // 往上跨出窗口时同样直接翻页，不请求不存在的 ↑。
+    await focus('p:b')
+    await focus('stop')
+    expect(w.landed.at(-1)).toBe('p:a')
+    expect(w.windowStarts.left).toBe(0)
+    await ui.unmount()
+  })
+}
+
+test('B2 没有框线时右栏越过边界也直接翻页', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(agentsState())
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await mountAt($, 'review-B2', 3)
+  const focus = personFocus($, 'review-B2')
+  expect(await ui.find({ key: 'more:agents:down' })).toBeUndefined()
+  await focus('t:r-1:agent-1')
+  await focus('stop')
+  expect(w.landed.at(-1)).toBe('t:r-1:agent-2')
+  expect(await ui.find({ key: 't:r-1:agent-2' })).toBeDefined()
+  expect(w.windowStarts.agents).toBe(1)
+  await focus('t:r-1:agent-1')
+  await focus('p:复核')
+  expect(w.landed.at(-1)).toBe('t:r-1:agent-0')
+  expect(w.windowStarts.agents).toBe(0)
+  await ui.unmount()
+})
+
+test('C 同一 runId 续跑后再次失联，每轮只提醒一次', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  w.alive = []
+  await clock.advance(4_000)
+  expect(w.prompts).toHaveLength(1)
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, pid: 4300, startedAt: iso(300) })
+  w.alive = [4300]
+  await clock.advance(2_000)
+  w.alive = []
+  await clock.advance(4_000)
+  expect(w.prompts).toHaveLength(2)
+})
+
+test('C2 同一 runId 续跑后重新自动打开面板并重新弹时长 toast', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  const state = { ...flowState, alertAfter: 100 }
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(state)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  expect(panel(w).shown).toBe(true)
+  expect(w.toasts).toHaveLength(1)
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...state, status: 'failed', endedAt: iso(252), tasks: state.tasks.map(t => t.status === 'running' ? { ...t, status: 'failed', endedAt: iso(252) } : t) })
+  await clock.advance(40_000)
+  expect(panel(w).shown).toBe(false)
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...state, startedAt: iso(42), tasks: state.tasks.map(t => t.status === 'running' ? { ...t, startedAt: iso(42) } : t) })
+  await clock.advance(4_000)
+  expect(panel(w).shown).toBe(true)
+  expect(panel(w).by).toBe('auto-open')
+  // 两轮都在第二个阈值内；轮内刷新仍不重复。
+  expect(w.toasts).toHaveLength(2)
+})
+
+test('D ps 非零退出且有错误时不报失联；pid 都不存在且没有错误时才提醒', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  w.psError = true
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(4_000)
+  expect(w.prompts).toHaveLength(0)
+  const ui = await mountAt($, 'review-D')
+  expect(await ui.find({ key: 'stop' })).toBeDefined()
+  w.psError = false
+  w.alive = []
+  await clock.advance(4_000)
+  expect(w.prompts).toHaveLength(1)
+  expect(await ui.find({ key: 'stop' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('E 窄终端详情保留返回和停止及其快捷键', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, tasks: flowState.tasks.map(t => t.label === '性能' ? { ...t, label: 'perf-hotpath-review' } : t) })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: { ...(PROPS as object), bodyColumns: 44 } as never })
+  await ui.press({ key: 't:r-1:perf-hotpath-review' })
+  expect((await ui.find({ key: 'back' }))?.props.hotkey).toBe('b')
+  expect((await ui.find({ key: 'stop' }))?.props.hotkey).toBe('x')
+  await ui.press({ key: 'stop' })
+  expect(controlWrites(w).at(-1)).toBe(`${ROOT}/r-1/control/perf-hotpath-review.stop`)
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ key: 't:r-1:perf-hotpath-review' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('E2 窄终端多个运行加翻页时保留停止整个 flow 的快捷键', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1', 's-1']
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(agentsState())
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  for (const bodyColumns of [104, 80, 64, 44]) {
+    const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'terminal', component: 'AbovePrompt', props: { ...(PROPS as object), bodyColumns } as never })
+    expect((await ui.find({ key: 'stop' }))?.props.hotkey).toBe('x')
+    await ui.press({ key: 'stop' })
+    expect(w.killed.at(-1)).toEqual(['kill', '-TERM', '4242'])
+    await ui.unmount()
+  }
+})
+
+test('F 刷新异常写入 debug 日志且下次刷新可以恢复', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  w.failSessionId = true
+  await clock.advance(2_000)
+  const errors = w.logs.filter(log => JSON.parse(log.text).event === 'refresh-failed')
+  expect(errors.length).toBeGreaterThan(0)
+  expect(errors.every(log => log.to === 'debug' && JSON.parse(log.text).error.length > 0)).toBe(true)
+  expect(w.toasts).toHaveLength(0)
+  expect(w.prompts).toHaveLength(0)
+  w.failSessionId = false
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify({ ...flowState, status: 'completed', endedAt: iso(252) })
+  await clock.advance(2_000)
+  const ui = await mountAt($, 'review-F')
+  expect(await ui.find({ key: 'stop' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('F2 动画同步和帧更新的异常只写 debug 日志', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  let failRuns = false
+  let failFrame = false
+  on('state.get', { plugin: 'codex-flow', key: 'runs' }, async ($, e, next) => {
+    // 钩子抛错会被 kit 跳过，故返回损坏数据使动画同步本身抛错。
+    if (failRuns) return { value: { value: null, version: 0 } } as never
+    return next(e)
+  })
+  on('state.set', { plugin: 'codex-flow', key: 'frame' }, async ($, e, next) => {
+    // 模拟宿主拒绝写入；update 重试到上限后会 reject。
+    if (failFrame) return { value: { isSet: false, version: 0 } }
+    return next(e)
+  })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  w.failSessionId = true
+  failRuns = true
+  await clock.advance(2_000)
+  const failures = () => w.logs.filter(log => log.to === 'debug' && JSON.parse(log.text).event === 'spinner-failed')
+  expect(failures().length).toBeGreaterThan(0)
+  const before = failures().length
+  failRuns = false
+  w.failSessionId = false
+  failFrame = true
+  await clock.advance(240)
+  expect(failures().length).toBeGreaterThan(before)
+  expect(failures().every(log => JSON.parse(log.text).error.length > 0)).toBe(true)
+  expect(w.toasts).toHaveLength(0)
+  expect(w.prompts).toHaveLength(0)
+})
+
+test('G 会话 ID 更换后旧会话任务仍显示、不会收起，失联仍提醒且不混入其他会话', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1', 'r-2']
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await mountAt($, 'review-G')
+  w.sessionId = 'sess-new'
+  await clock.advance(42_000)
+  expect(await ui.find({ key: 'p:审查' })).toBeDefined()
+  expect(await ui.find({ text: 'someone-else' })).toBeUndefined()
+  // /clear 没有 session.start；状态行下次状态变更使用新的会话文件。
+  w.alive = []
+  await clock.advance(4_000)
+  expect(w.prompts).toHaveLength(1)
+  expect(w.prompts[0]).toContain('review-api')
+  await clock.advance(32_000)
+  expect(JSON.parse(w.files['/home/me/.claude/codex-flow/panel-sess-new.json']!).shown).toBe(false)
+  await ui.unmount()
+})
+
+test('G2 热重载已有的会话 ID 从宿主状态读取，新会话已结束记录重新纳入', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1', 'r-2']
+  w.sessionId = 'sess-new'
+  // 预置宿主 atom 值，模拟模块变量全新时已有的历史会话。
+  let ids = ['sess-1']
+  on('state.get', { plugin: 'codex-flow', key: 'sessions' }, async ($, e, next) => {
+    const result = await next(e)
+    return result.value?.value ? result : { value: { value: ids, version: result.value?.version ?? 0 } }
+  })
+  on('state.set', { plugin: 'codex-flow', key: 'sessions' }, async ($, e, next) => {
+    ids = e.value
+    return next(e)
+  })
+  w.files[`${ROOT}/r-2/state.json`] = JSON.stringify({ ...otherState, status: 'completed', endedAt: iso(252) })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await mountAt($, 'review-G2')
+  expect(await ui.find({ key: 'p:审查' })).toBeDefined()
+  expect(ids).toEqual(['sess-1', 'sess-new'])
+  // 这个 ID 之前被当成别的会话缓存，但进程现在已用过它；mtime 没变也要重读。
+  w.sessionId = 'sess-2'
+  await clock.advance(2_000)
+  expect(await ui.find({ text: 'someone-else' })).toBeDefined()
+  expect(ids).toEqual(['sess-1', 'sess-new', 'sess-2'])
+  await ui.unmount()
+})
+
+test('H 桌面 maxRows=3 没有 agent 行就没有 agent 窗口、翻页或不可见焦点', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 + 252_000 })
+  const w = world(on)
+  w.dirs = ['r-1']
+  w.files[`${ROOT}/r-1/state.json`] = JSON.stringify(agentsState())
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: 'codex-flow', surface: 'desktop', component: 'AbovePrompt', requestId: 'review-H', props: { ...(PROPS as object), maxRows: 3 } as never })
+  expect(await ui.findAll({ type: 'Button', text: /^agent-\d+$/ })).toHaveLength(0)
+  expect(await ui.find({ key: 'more:agents:down' })).toBeUndefined()
+  expect((await texts(ui)).some(t => /^agent |of 20/.test(t))).toBe(false)
+  await ui.press({ key: 'p:审查' })
+  expect(w.focuses.some(key => key.startsWith('t:'))).toBe(false)
+  expect(drawnRows(await ui.drawn())).toBeLessThanOrEqual(3)
   await ui.unmount()
 })

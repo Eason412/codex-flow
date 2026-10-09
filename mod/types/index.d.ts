@@ -32,6 +32,8 @@ export type FlowTask = {
 
 export type FlowRun = {
   runId: string
+  // 同一 runId 续跑会换开始时间，用来区分提醒和自动打开的轮次
+  startedAt: string
   dir: string
   kind: 'flow' | 'single'
   name: string
@@ -84,9 +86,11 @@ declare module 'claude-code' {
       focused: string | null
       windows: WindowStarts
       reminded: string[]
+      // 本进程用过的会话 ID：/clear 换 ID，热重载后仍保留
+      sessions: string[]
       working: boolean
       shown: boolean
-      // 自动打开过的运行：用户收起后，同一批任务不再把面板弹出来
+      // 自动打开过的运行轮次：用户收起后，同一轮不再把面板弹出来
       opened: string[]
       // 面板这次打开后出现过的运行：结束后仍列在下方，面板关掉时清空
       kept: string[]

@@ -1,7 +1,7 @@
 // 面板层级、窗口与自动显示的状态变更；atom、队列和实际焦点仍由入口持有。
 import type { FlowRun, FlowTask, Nav, PanelRecord, WindowColumn, WindowStarts } from '../types'
 import { tasksOf } from './format'
-import { RECENT, listedRuns, entry, defaultPhase, up, columnKeys, windowStart, leftItems, leftKey, taskKey, detailKey, isItem, canSteer, steerKey, verticalLeft } from './navigation'
+import { RECENT, listedRuns, entry, defaultPhase, up, columnKeys, windowStart, leftItems, leftKey, taskKey, detailKey, isItem, canSteer, steerKey, verticalLeft, runRound } from './navigation'
 
 export type ActionContext = {
   readSteerRound: () => Promise<number>
@@ -23,6 +23,7 @@ export type ActionContext = {
   emptyWindows: WindowStarts
   // 各列当前画出的行数（竖排版面里阶段和 agent 上下叠着，各占一部分）；vertical：画的是竖排版面，没有左右栏
   windowSize: WindowStarts
+  pagerKeys: Set<string>
   vertical: boolean
   focusOn: (key: string | null) => Promise<void>
   loadResult: (run: FlowRun, task: FlowTask) => Promise<string | null>
@@ -52,9 +53,9 @@ export async function autoShow(ctx: ActionContext, list: FlowRun[]) {
   await ctx.changePanel(async () => {
     const running = list.filter(r => r.status === 'running')
     const seen = await ctx.readOpened()
-    const fresh = running.filter(r => !seen.includes(r.runId))
+    const fresh = running.filter(r => !seen.includes(runRound(r)))
     if (fresh.length) {
-      await ctx.updateOpened(old => [...old, ...fresh.map(r => r.runId)].slice(-100))
+      await ctx.updateOpened(old => [...old, ...fresh.map(runRound)].slice(-100))
       const at = await ctx.readNav()
       const watching = list.some(r => r.runId === at.runId)
       const visible = await ctx.readShown()
@@ -71,7 +72,8 @@ export async function autoShow(ctx: ActionContext, list: FlowRun[]) {
 export async function moveTo(ctx: ActionContext, to: Nav) {
   const before = await ctx.readNav()
   if (before.runId !== to.runId) {
-    await ctx.updateWindows(() => ({ ...ctx.emptyWindows }))
+    // 换运行只清右栏；左栏保留起点，syncWindows 只在目标不在窗口内时移动。
+    await ctx.updateWindows(old => ({ ...ctx.emptyWindows, left: old.left }))
     await ctx.updateFocused(() => null)
   } else if (before.phase !== to.phase) {
     // 同一个运行换阶段只清 agent 窗口；左栏窗口由 syncWindows 最小幅度校正。
@@ -137,7 +139,7 @@ export async function trackFocus(ctx: ActionContext, key: string) {
   }
 }
 
-export async function shiftWindow(ctx: ActionContext, column: WindowColumn, direction: 'up' | 'down') {
+export async function shiftWindow(ctx: ActionContext, column: WindowColumn, direction: 'up' | 'down', focus = true) {
   const at = await ctx.readNav()
   const keys = columnKeys(await listed(ctx), at, column, ctx.vertical)
   if (!keys.length) return
@@ -147,6 +149,7 @@ export async function shiftWindow(ctx: ActionContext, column: WindowColumn, dire
   const preferred = keys.includes(hot ?? '') ? hot : column === 'left' && left ? left : column === 'detailAgents' && at.label ? detailKey(at.runId ?? '', at.label) : null
   // resize 后 state 可能还是上次尺寸的起点，先按当前绘制窗口校正再移动一格。
   const size = ctx.windowSize[column]
+  if (size <= 0) return
   const old = windowStart((await ctx.readWindows())[column], keys.length, size, keys.indexOf(preferred ?? ''))
   const start = windowStart(old + (direction === 'up' ? -1 : 1), keys.length, size)
   if (start === old) return
@@ -154,7 +157,8 @@ export async function shiftWindow(ctx: ActionContext, column: WindowColumn, dire
   // 引擎不会重入当前 ui.focus 钩子，翻页自己同步阶段/详情，再请求实际移动光标。
   await trackFocus(ctx, key)
   await ctx.updateWindows(w => ({ ...w, [column]: start }))
-  await ctx.focusOn(key)
+  if (focus) await ctx.focusOn(key)
+  return key
 }
 
 export async function goBack(ctx: ActionContext) {
@@ -185,7 +189,7 @@ export async function selectPhase(ctx: ActionContext, run: FlowRun, title: strin
   if (ctx.vertical && run.kind === 'single' && first) {
     await showAgent(ctx, run, first, 'agents')
     await ctx.focusOn('back')
-  } else if (first) await ctx.focusOn(taskKey(run.runId, first.label))
+  } else if (first && ctx.windowSize.agents > 0) await ctx.focusOn(taskKey(run.runId, first.label))
 }
 
 export async function selectAgent(ctx: ActionContext, run: FlowRun, t: FlowTask) {
@@ -214,6 +218,7 @@ export async function pageRedirect(ctx: ActionContext, from: string | null, to: 
   const list = await listed(ctx)
   const windows = await ctx.readWindows()
   for (const column of Object.keys(ctx.emptyWindows) as WindowColumn[]) {
+    if (ctx.windowSize[column] <= 0) continue
     const keys = columnKeys(list, at, column, ctx.vertical)
     const index = keys.indexOf(from)
     if (index < 0 || keys.includes(to)) continue
@@ -227,7 +232,10 @@ export async function pageRedirect(ctx: ActionContext, from: string | null, to: 
     // 竖排版面：agent 之前只有它自己的阶段行（及更上面的阶段）；往这些走是往上翻，其余（后面的阶段、翻页键、按钮）是往下翻
     const left = columnKeys(list, at, 'left', ctx.vertical)
     const next = ctx.vertical && column === 'agents' ? !(left.includes(to) && left.indexOf(to) <= left.indexOf(verticalLeft(list, at).selected ?? '')) : column === 'agents' ? !left.includes(to) : column === 'left' ? columnKeys(list, at, 'agents', ctx.vertical).includes(to) || to.startsWith('more:left:') : to.startsWith('steer:') || to.startsWith(`more:${column}:`)
-    return `more:${column}:${below && (!above || next) ? 'down' : 'up'}`
+    const direction = below && (!above || next) ? 'down' : 'up'
+    const key = `more:${column}:${direction}`
+    // 提示放不下或没有边线时，直接翻页，交给引擎聚焦新画出的条目。
+    return ctx.pagerKeys.has(key) ? key : await shiftWindow(ctx, column, direction, false) ?? null
   }
   return null
 }

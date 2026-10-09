@@ -38,6 +38,7 @@ export type ViewContext = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'> 
     selectDetail: (run: FlowRun, task: FlowTask) => Promise<void>
     clearSteerFocus: (steer: boolean) => void
     sendSteer: (runId: string, label: string, value: string) => void
+    pagerVisible: (key: string) => void
   }
 }
 
@@ -96,21 +97,33 @@ export function pagerNodes(ctx: ViewContext, pager: Pager) {
   const up = pager.start > 0
   const down = pager.start + pager.shown < pager.total
   const nodes: RenderElement[] = [text(ctx, label, MUTED)]
-  if (up) nodes.push(<Button plain dimColor key={`more:${pager.column}:up`} label="↑" onPress={() => callbacks.shiftWindow(pager.column, 'up')} />)
-  if (down) nodes.push(<Button plain dimColor key={`more:${pager.column}:down`} label="↓" onPress={() => callbacks.shiftWindow(pager.column, 'down')} />)
+  if (up) {
+    callbacks.pagerVisible(`more:${pager.column}:up`)
+    nodes.push(<Button plain dimColor key={`more:${pager.column}:up`} label="↑" onPress={() => callbacks.shiftWindow(pager.column, 'up')} />)
+  }
+  if (down) {
+    callbacks.pagerVisible(`more:${pager.column}:down`)
+    nodes.push(<Button plain dimColor key={`more:${pager.column}:down`} label="↓" onPress={() => callbacks.shiftWindow(pager.column, 'down')} />)
+  }
   return { nodes, width: cells(label) + Number(up) + Number(down) }
 }
 
+const pagerCells = (pager: Pager) => cells(`${pager.start + 1}–${pager.start + pager.shown} of ${pager.total} `) + Number(pager.start > 0) + Number(pager.start + pager.shown < pager.total)
+
 // 按钮画成「x: 停止」：hotkey、冒号、空格，再是文字
 const buttonCells = (label: string) => 3 + cells(label)
-function buttonsOf(ctx: ViewContext, foot: Foot) {
-  return [foot.stop, foot.back ? '返回' : null, ctx.canHide ? '关闭' : null].filter((b): b is string => !!b)
-}
 // 下边线上的按键提示：提示文字在前（放不下就截短或省掉），停止、返回、关闭按钮在后，都是暗灰
 function footer(ctx: ViewContext, foot: Foot, room: number) {
   const { Button, callbacks } = ctx
-  const labels = buttonsOf(ctx, foot)
-  const buttonsWidth = labels.reduce((sum, b) => sum + buttonCells(b), 0) + Math.max(0, labels.length - 1) * 3
+  let stop = foot.stop
+  let hide = ctx.canHide
+  const labelsOf = () => [stop, foot.back ? '返回' : null, hide ? '关闭' : null].filter((b): b is string => !!b)
+  const widthOf = () => labelsOf().reduce((sum, b) => sum + buttonCells(b), 0) + Math.max(0, labelsOf().length - 1) * 3
+  // 窄栏先缩短停止标签，再省关闭；返回与停止优先保留。
+  if (widthOf() > room && stop) stop = '停止'
+  if (widthOf() > room && hide) hide = false
+  const labels = labelsOf()
+  const buttonsWidth = widthOf()
   if (buttonsWidth > room) return { nodes: [] as RenderElement[], width: 0 }
   let hint = foot.hints.join(' · ')
   const sep = labels.length ? 3 : 0
@@ -118,9 +131,9 @@ function footer(ctx: ViewContext, foot: Foot, room: number) {
   const nodes: RenderElement[] = []
   if (hint) nodes.push(text(ctx, `${hint}${labels.length ? ' · ' : ''}`, MUTED))
   const buttons: RenderElement[] = []
-  if (foot.stop) buttons.push(<Button plain dimColor hotkey="x" key="stop" label={foot.stop} onPress={() => callbacks.pressStop()} />)
+  if (stop) buttons.push(<Button plain dimColor hotkey="x" key="stop" label={stop} onPress={() => callbacks.pressStop()} />)
   if (foot.back) buttons.push(<Button plain dimColor hotkey="b" key="back" label="返回" onPress={() => callbacks.goBack()} />)
-  if (ctx.canHide) buttons.push(<Button plain dimColor hotkey="q" key="hide" label="关闭" onPress={() => callbacks.pressHide()} />)
+  if (hide) buttons.push(<Button plain dimColor hotkey="q" key="hide" label="关闭" onPress={() => callbacks.pressHide()} />)
   buttons.forEach((node, i) => {
     if (i) nodes.push(text(ctx, ' · ', MUTED))
     nodes.push(node)
@@ -156,23 +169,33 @@ function topBorder(ctx: ViewContext, left: Column, right: Column) {
 // 下边线：左段右侧放左栏翻页；右段左侧放按键提示，右侧放右栏翻页（1–3 of 5 ↓）
 function bottomBorder(ctx: ViewContext, left: Column, right: Column, foot: Foot) {
   const { Box } = ctx
+  const rw = right.width + 2
+  let rp = right.pager
+  let pagerWidth = rp ? pagerCells(rp) + 2 : 0
+  let foot2 = footer(ctx, foot, rw - pagerWidth - 4)
+  if (!foot2.width && (foot.stop || foot.back || ctx.canHide)) {
+    // 右栏放不下按钮时先省右栏翻页提示；仍放不下就用整条下边线。
+    rp = null
+    pagerWidth = 0
+    foot2 = footer(ctx, foot, rw - 4)
+    if (!foot2.width) {
+      const full = footer(ctx, foot, ctx.width - 4)
+      return <Box>{text(ctx, '╰─ ', LINE)}{full.nodes}{text(ctx, `${'─'.repeat(Math.max(0, ctx.width - full.width - 4))}╯`, LINE)}</Box>
+    }
+  }
   const nodes: RenderElement[] = [text(ctx, '╰', LINE)]
   const lw = left.width + 2
-  const lp = left.pager ? pagerNodes(ctx, left.pager) : null
-  if (lp && lp.width + 3 <= lw) nodes.push(text(ctx, `${'─'.repeat(lw - lp.width - 2)} `, LINE), ...lp.nodes, text(ctx, ' '))
+  const lp = left.pager && pagerCells(left.pager) + 3 <= lw ? pagerNodes(ctx, left.pager) : null
+  if (lp) nodes.push(text(ctx, `${'─'.repeat(lw - lp.width - 2)} `, LINE), ...lp.nodes, text(ctx, ' '))
   else nodes.push(text(ctx, '─'.repeat(lw), LINE))
   nodes.push(text(ctx, '┴', LINE))
-  const rw = right.width + 2
-  const rp = right.pager ? pagerNodes(ctx, right.pager) : null
-  const pagerWidth = rp ? rp.width + 2 : 0
-  const foot2 = footer(ctx, foot, rw - pagerWidth - 4)
   let used = 0
   if (foot2.width) {
     nodes.push(text(ctx, '─ ', LINE), ...foot2.nodes, text(ctx, ' '))
     used += foot2.width + 3
   }
   nodes.push(text(ctx, '─'.repeat(Math.max(1, rw - used - pagerWidth)), LINE))
-  if (rp) nodes.push(text(ctx, ' '), ...rp.nodes, text(ctx, ' '))
+  if (rp) nodes.push(text(ctx, ' '), ...pagerNodes(ctx, rp).nodes, text(ctx, ' '))
   nodes.push(text(ctx, '╯', LINE))
   return <Box>{nodes}</Box>
 }

@@ -5,6 +5,7 @@ import { tasksOf } from './format'
 export const RECENT = 30
 export const TOP: Nav = { runId: null, level: null, phase: null, label: null, text: null }
 export const runKey = (runId: string) => `r:${runId}`
+export const runRound = (run: FlowRun) => `${run.runId}:${run.startedAt}`
 export const phaseKey = (title: string) => `p:${title}`
 export const taskKey = (runId: string, label: string) => `t:${runId}:${label}`
 // 详情左栏的 agent 另用一套键：和 agent 栏同键时，切换层级后光标可能停在旧树的位置上
@@ -116,6 +117,7 @@ export function columnKeys(list: FlowRun[], at: Nav, column: WindowColumn, verti
 
 // 旧版本留在 $.state 里的窗口起点可能缺这一栏，按 0 算
 export const windowStart = (start: number, length: number, size: number, index = -1) => {
+  if (size <= 0) return 0
   let value = Math.max(0, Math.min(Number.isFinite(start) ? start : 0, Math.max(0, length - size)))
   if (index >= 0 && index < value) value = index
   if (index >= value + size) value = index - size + 1
