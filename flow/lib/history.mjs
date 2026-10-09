@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { HOME, RUNS, effectiveStatus, elapsedSeconds, nowIso, readJson, statePath } from "./state.mjs";
 import { tokenBreakdown } from "./tokens.mjs";
+import { die } from "./runtime.mjs";
 
 const historyPath = () => path.join(HOME, "history.jsonl");
 const warn = (error) => process.stderr.write(`[codex-flow] ⚠ history 写入失败: ${String(error.message).replace(/[\r\n]+/g, " ")}\n`);
@@ -14,7 +15,7 @@ export function historyRunIds() {
   catch (error) { if (error.code === "ENOENT") return new Set(); throw error; }
   const ids = new Set();
   for (const line of text.split("\n")) {
-    try { const record = JSON.parse(line); if (record.runId) ids.add(record.runId); } catch {}
+    try { const record = JSON.parse(line); if (record.runId && record.type !== "verdict") ids.add(record.runId); } catch {}
   }
   return ids;
 }
@@ -22,7 +23,7 @@ export function historyRunIds() {
 export function historyRecord(dir, state) {
   return {
     runId: state.runId ?? path.basename(dir), kind: state.kind ?? "flow", name: state.name ?? null,
-    cwd: state.cwd ?? null, status: effectiveStatus(state), startedAt: state.startedAt ?? null,
+    why: state.why ?? null, cwd: state.cwd ?? null, status: effectiveStatus(state), startedAt: state.startedAt ?? null,
     endedAt: state.endedAt ?? null, resumed: state.resumed ?? (state.kind === "single" ? state.tasks?.[0]?.resumed ?? null : null), recordedAt: nowIso(),
     tasks: (state.tasks ?? []).map((task) => {
       let usage = null;
@@ -32,7 +33,7 @@ export function historyRecord(dir, state) {
         try { chars = [...fs.readFileSync(path.resolve(dir, task.result), "utf8").trim()].length; } catch {}
       }
       return {
-        label: task.label ?? null, phase: task.phase ?? null, model: task.model ?? null, effort: task.effort ?? null,
+        label: task.label ?? null, phase: task.phase ?? null, model: task.model ?? null, effort: task.effort ?? null, pick: task.pick ?? null,
         actualModel: task.actualModel ?? null, actualEffort: task.actualEffort ?? null,
         serviceTier: task.serviceTier ?? null, actualServiceTier: task.actualServiceTier ?? null,
         status: task.status ?? null, seconds: task.startedAt ? elapsedSeconds(task.startedAt, task.endedAt ?? state.endedAt) : 0,
@@ -79,4 +80,33 @@ export function cmdHistory() {
     if (appendHistory(dir, state)) { added++; ids.add(state.runId ?? entry.name); }
   }
   process.stdout.write(`[codex-flow] history 补录 ${added} 条，跳过 ${skipped} 条\n`);
+}
+
+// 主 agent 验收后记一句结论，和运行记录一起留在 history.jsonl，日后复盘拆法和选模型：
+// used 直接用上；partial 部分用上或主 agent 自己补改了不少；unused 没用上。后两种要写原因
+export const VERDICTS = ["used", "partial", "unused"];
+export function cmdVerdict({ positionals }) {
+  const usage = "用法: verdict <runId> [任务名] <used|partial|unused> [\"原因\"]";
+  const [runId, ...rest] = positionals;
+  if (!runId) die(usage);
+  const at = rest.findIndex((v) => VERDICTS.includes(v));
+  if (at < 0 || at > 1) die(usage);
+  const label = at === 1 ? rest[0] : null;
+  const verdict = rest[at];
+  const reason = rest.slice(at + 1).join(" ").trim() || null;
+  if (verdict !== "used" && !reason) die(`${verdict} 要写一句原因，例如：verdict ${runId} ${label ? label + " " : ""}${verdict} "漏了分页的边界，我补改了"`);
+  const state = readJson(statePath(path.join(RUNS, runId)));
+  let labels = state?.tasks?.map((t) => t.label);
+  if (!labels) {
+    let records = [];
+    try { records = fs.readFileSync(historyPath(), "utf8").split("\n").filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }); } catch {}
+    const found = records.filter((r) => r.runId === runId && r.type !== "verdict").at(-1);
+    if (!found) die(`找不到运行 ${runId}`);
+    labels = (found.tasks ?? []).map((t) => t.label);
+  }
+  if (label && !labels.includes(label)) die(`运行 ${runId} 里没有任务「${label}」，有：${labels.join("、")}`);
+  const record = { type: "verdict", runId, label, verdict, reason, recordedAt: nowIso() };
+  fs.mkdirSync(HOME, { recursive: true });
+  fs.appendFileSync(historyPath(), JSON.stringify(record) + "\n", "utf8");
+  process.stdout.write(`[codex-flow] 已记下 ${runId}${label ? ` 「${label}」` : ""}：${verdict}${reason ? `（${reason}）` : ""}\n`);
 }

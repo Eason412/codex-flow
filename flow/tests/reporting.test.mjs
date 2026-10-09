@@ -296,3 +296,45 @@ test('旧单发 rollout 可拆累计用量，归档 flow rollout 可用于补录
   task.threadId = 'missing';
   assert.equal(historyRecord(dir, state).tasks[0].tokenUsage, undefined);
 });
+
+test('计划的 why 和任务的 pick 进 history；只有动作或写了模型名的阶段名开跑时提示；pick 写错拒绝启动', () => {
+  const plan = { name: '记录', cwd: root, why: '两个模块互不调用，可以并行', phases: [
+    { title: '实现', tasks: [{ label: '甲', ...sol, pick: 'claude', prompt: '执行' }] },
+    { title: 'sol 润色', tasks: [{ label: '乙', ...sol, prompt: '执行' }] },
+    { title: '实现分页接口', tasks: [{ label: '丙', ...sol, pick: 'user', prompt: '执行' }] }] };
+  const result = runPlan(plan);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /阶段名「实现」只有动作/);
+  assert.match(result.stderr, /阶段名「sol 润色」写了模型名/);
+  assert.doesNotMatch(result.stderr, /阶段名「实现分页接口」/);
+  const record = history().at(-1);
+  assert.equal(record.why, '两个模块互不调用，可以并行');
+  assert.deepEqual(record.tasks.map((t) => t.pick), ['claude', null, 'user']);
+  plan.phases[0].tasks[0].pick = 'me';
+  const bad = runPlan(plan);
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /pick 只能写 default、user、claude/);
+});
+
+test('verdict 记下验收结论：整个运行或单个任务，partial/unused 要原因，任务名写错报错，不影响按 runId 补录', () => {
+  assert.equal(runPlan({ name: '验收', cwd: root, phases: [{ title: '实现分页接口', tasks: [{ label: '甲', ...sol, prompt: '执行' }, { label: '乙', ...sol, prompt: '执行' }] }] }).status, 0);
+  const { state } = lastRun();
+  let r = command(['verdict', state.runId, 'used']);
+  assert.equal(r.status, 0, r.stderr);
+  r = command(['verdict', state.runId, '甲', 'partial']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /要写一句原因/);
+  r = command(['verdict', state.runId, '甲', 'partial', '漏了边界，我补改了']);
+  assert.equal(r.status, 0, r.stderr);
+  r = command(['verdict', state.runId, '丁', 'used']);
+  assert.match(r.stderr, /没有任务「丁」/);
+  r = command(['verdict', 'r-none', 'used']);
+  assert.match(r.stderr, /找不到运行/);
+  const verdicts = history().filter((x) => x.type === 'verdict');
+  assert.deepEqual(verdicts.map(({ label, verdict, reason }) => ({ label, verdict, reason })),
+    [{ label: null, verdict: 'used', reason: null }, { label: '甲', verdict: 'partial', reason: '漏了边界，我补改了' }]);
+  // 删掉运行记录行、只留结论行时，补录仍会把这次运行记进去
+  fs.writeFileSync(path.join(HOME, 'history.jsonl'), verdicts.map((v) => JSON.stringify(v) + '\n').join(''));
+  assert.equal(command(['history', '--backfill']).status, 0);
+  assert.ok(history().some((x) => x.runId === state.runId && x.type !== 'verdict'));
+});

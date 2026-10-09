@@ -63,10 +63,26 @@ export function loadPlan(planFile) {
   return plan;
 }
 
+// 模型是谁定的：default 按 SKILL.md 的分工表，user 用户指定，claude 主 agent 自己判断后选的
+export const PICKS = ["default", "user", "claude"];
+
+// 阶段名要让人看出这一步交出什么：只有动作、或写了模型名的，开跑时提示一句（不阻止）
+const BARE_PHASE = new Set(["实现", "核对", "修复", "验证", "准备", "等待", "处理", "执行", "审查", "检查", "测试", "收尾", "调研", "汇总", "润色"]);
+export function phaseNotes(plan) {
+  const notes = [];
+  for (const { title } of plan.phases) {
+    const name = String(title).trim();
+    if (/sol|astra|gpt|luna/i.test(name)) notes.push(`阶段名「${name}」写了模型名；阶段名写这一步交出什么（动作＋对象），模型看任务就知道`);
+    else if (BARE_PHASE.has(name)) notes.push(`阶段名「${name}」只有动作，看不出交出什么；写成动作＋对象，例如「实现分页接口」`);
+  }
+  return notes;
+}
+
 export function validatePlan(plan) {
   if (!plan || typeof plan.name !== "string" || !plan.name.trim()) die("计划缺少 name");
   if (!Array.isArray(plan.phases) || plan.phases.length === 0) die("计划缺少 phases");
   if (plan.isolation !== undefined && plan.isolation !== "worktree") die('计划的 isolation 只能写 "worktree"');
+  if (plan.why !== undefined && (typeof plan.why !== "string" || !plan.why.trim())) die("计划的 why 要写成一句话");
   const labels = new Set();
   const titles = new Set();
   for (const phase of plan.phases) {
@@ -79,6 +95,7 @@ export function validatePlan(plan) {
       try { checkModelEffort(task.model, task.effort, task.label); } catch (error) { die(error.message); }
       if (typeof task.prompt !== "string" || !task.prompt.trim()) die(`任务「${task.label}」缺少 prompt`);
       if (task.schema) loadSchema(task.schema);
+      if (task.pick !== undefined && !PICKS.includes(task.pick)) die(`任务「${task.label}」的 pick 只能写 ${PICKS.join("、")}`);
       if (task.cwd !== undefined && !fs.statSync(task.cwd, { throwIfNoEntry: false })?.isDirectory()) die(`任务「${task.label}」的 cwd 不是目录: ${task.cwd}`);
       if (task.after !== undefined && !(Array.isArray(task.after) && task.after.every((n) => typeof n === "string" && n.trim()))) {
         die(`任务「${task.label}」的 after 要写成任务名或阶段标题的数组`);

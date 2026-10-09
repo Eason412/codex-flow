@@ -8,6 +8,7 @@
 //   codex-flow.mjs cancel <runId> [任务名]              停整个 flow 或其中一个任务
 //   codex-flow.mjs steer <runId> <任务名> "<补充指示>"   给运行中的任务插话
 //   codex-flow.mjs watch <runId> [--alert-after 秒]     等 flow/单发结束并打印汇总；显式阈值才提前提醒
+//   codex-flow.mjs verdict <runId> [任务名] <used|partial|unused> ["原因"]   验收后记下结果是否用上
 //   codex-flow.mjs history --backfill                 补录现有运行到 history.jsonl，已有 runId 跳过
 //   flow schema: review / opinion / result / report，或 schema 文件路径
 //   run.sh -j report 回传结论和全文路径；-j review/opinion 回传全文；-r/-f 自动取消归档
@@ -23,7 +24,7 @@ import { cmdStatus, cmdCancel, cmdSteer, cmdWatch } from "./lib/commands.mjs";
 import { cmdStats } from "./lib/stats.mjs";
 import { SINGLE_FLAGS, cmdCheck, cmdSingleStart, cmdSingleWatch, cmdSingleEnd } from "./lib/single.mjs";
 import { cmdClean } from "./lib/isolation.mjs";
-import { cmdHistory } from "./lib/history.mjs";
+import { cmdHistory, cmdVerdict } from "./lib/history.mjs";
 import { cmdUnarchive } from "./lib/threads.mjs";
 
 export { shortCommand, activityOf } from "./lib/activity.mjs";
@@ -71,6 +72,7 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
   cancel <runId> [任务名]                            停止运行或任务
   steer <runId> <任务名> "<补充指示>"                 给运行中的任务插话
   watch <runId> [--alert-after 秒]                    默认等 flow/单发结束，打印 summary.txt 全文；显式阈值才提前提醒
+  verdict <runId> [任务名] used|partial|unused ["原因"]  验收后记下结果是否用上（partial、unused 要写原因）
   history --backfill                                补录现有目录到 history.jsonl，已有 runId 或无 state.json 的目录跳过
   stats <runId> [--json]                             查看任务计量
   clean <runId>                                     清理隔离成果
@@ -96,6 +98,7 @@ run.sh -j review/opinion 回传全文，其余回传至多三行结论和全文�
     case "watch": await cmdWatch(parseArgs(rest, ["alert-after"])); break;
     case "stats": cmdStats(strict(parseArgs(rest), ["json"], 1, "用法: stats <runId> [--json]")); break;
     case "clean": cmdClean(strict(parseArgs(rest), [], 1, "用法: clean <runId>")); break;
+    case "verdict": cmdVerdict(parseArgs(rest)); break;
     case "history": {
       const parsed = strict(parseArgs(rest), ["backfill"], 0, "用法: history --backfill");
       if (!parsed.flags.backfill) die("用法: history --backfill");
@@ -108,6 +111,6 @@ run.sh -j review/opinion 回传全文，其余回传至多三行结论和全文�
     case "_single-start": cmdSingleStart(parseArgs(rest, SINGLE_FLAGS)); break;
     case "_single-end": cmdSingleEnd(parseArgs(rest, [...SINGLE_FLAGS, "code"])); break;
     default:
-      die("用法: run | status | cancel | steer | watch | stats | clean | history --backfill（watch 默认等结束；schema: review/opinion/result/report；见文件开头的说明）");
+      die("用法: run | status | cancel | steer | watch | stats | verdict | clean | history --backfill（watch 默认等结束；schema: review/opinion/result/report；见文件开头的说明）");
   }
 }

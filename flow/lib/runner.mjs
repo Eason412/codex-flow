@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { briefOf, isAlive, newRunId, nowIso, promptHash, pruneOldRuns, readJson, runDir, statePath, serviceTierOf, writeJson } from "./state.mjs";
 import { ALERT_AFTER, checkProcs, current, die, fileSafe, markStopping, save, servers, SESSION, setCurrent, stopping } from "./runtime.mjs";
-import { literal, loadPlan, loadSchema, renderPrompt, validatePlan, withContract } from "./plan.mjs";
+import { literal, loadPlan, loadSchema, phaseNotes, renderPrompt, validatePlan, withContract } from "./plan.mjs";
 import { inScope, realPath } from "./scope.mjs";
 import { killGroup, recheckTask } from "./checks.mjs";
 import { leaseOf, leases, overlapNotes } from "./leases.mjs";
@@ -97,6 +97,7 @@ function createFlowState(dir, plan) {
     kind: "flow",
     runId: path.basename(dir),
     name: plan.name,
+    ...(plan.why ? { why: plan.why.trim() } : {}),
     session: SESSION,
     pid: process.pid,
     cwd,
@@ -279,13 +280,19 @@ export async function runFlow(planFile, resumeId, rerun = []) {
   const planTasks = new Map(plan.phases.flatMap((p) => p.tasks.map((t) => [t.label, { ...t, phase: p.title }])));
   for (const label of rerun) if (!planTasks.has(label)) die(`--rerun 指向不存在的任务: ${label}`);
   populateFlowTasks(dir, state, previous, planTasks, deps, new Set(rerun), notes);
+  // pick 跟着本次计划走，复用的任务也一样
+  for (const task of state.tasks) {
+    const pick = planTasks.get(task.label)?.pick;
+    if (pick) task.pick = pick;
+    else delete task.pick;
+  }
   if (notes.length) state.notes = notes;
   setCurrent(dir, state);
   save();
   process.stdout.write(`[codex-flow] ${plan.name} 开始 · ${state.runId}\n`);
   const toRun = state.tasks.filter((t) => t.status === "pending" && !t.recheck).map((t) => ({ ...planTasks.get(t.label), cwd: planTasks.get(t.label).cwd ?? state.cwd }));
   const planned = [...planTasks.values()];
-  for (const line of [...overlapNotes(toRun, deps), ...isolationNotes(planned, deps), ...notes]) process.stderr.write(`[codex-flow] ${line}\n`);
+  for (const line of [...overlapNotes(toRun, deps), ...isolationNotes(planned, deps), ...phaseNotes(plan), ...notes]) process.stderr.write(`[codex-flow] ${line}\n`);
 
   await scheduleTasks(dir, state, planTasks, deps);
   // 停止中关 app-server 会让启动中的任务提前结束，由 onStop 收尾和退出
