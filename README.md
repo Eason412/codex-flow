@@ -23,6 +23,8 @@
 
 ## ⚙️ 工作原理
 
+![左边是任务运行时的对话和面板，右边是运行结束后的汇总](docs/images/overview.png)
+
 ```text
 Claude Code 主对话
  ├─ run.sh ─────────────────► codex exec              单个任务
@@ -55,10 +57,14 @@ Claude Code 主对话
 
 并行写入的处理方式与 Claude Workflow 一致：编排者按文件划分任务，需要接力的任务依次运行，只有确需同时修改同一批文件时才使用 worktree。依据是 Claude Code agent teams 文档对文件归属的要求，以及一项针对 33,596 个 agent PR 的冲突研究：worktree 只把冲突推迟到合并阶段，按文件划分、逐个合并、尽早发现才能减少冲突。
 
+![「修复超时」设置了 after，「排查超时原因」一完成就开始；「调整连接池配置」和「修复内存泄漏」的写入范围重叠，要等后者完成才开始](docs/images/timeline.png)
+
 - **写入范围排队**：声明了 `writes` 的任务，若范围与正在运行的任务重叠，则等待前者结束后启动，效果等同于添加 `after`。未声明 `writes` 的任务照常并行，启动时提示补充范围。
 - **同文件修改提示**：两个同时运行的任务修改了同一文件时，汇总中双方各有一行提示，由 Claude 判断是否重跑先结束的一方。检测依据是 Codex 的文件修改记录，shell 命令写入的文件不在其中。
 - **worktree 隔离（可选）**：设置 `isolation: "worktree"` 的任务在独立 worktree 中运行与验收，与 Claude Workflow 的 `isolation: 'worktree'` 对应。产生改动时，成果保存为分支 `codex-flow/<runId>/<任务名>`，汇总给出查看与合并命令，由 Claude 审阅后合并；未产生改动时不保留任何内容。可写在计划顶层作为默认值，单个任务以 `false` 退出。
 - **隔离的代价与限制**：每个隔离任务占用一份完整检出（8.5k 文件的仓库约 1 秒、240MB），同时最多 4 个（`CODEX_FLOW_MAX_WORKTREES`）。排在隔离任务之后的任务看不到其改动，需要接力时应改为依次运行，或分两次运行并在中间合并。被忽略的文件不进入成果分支；worktree 目录在保存分支后删除，`keepWorktree: true` 可保留。
+
+![两个隔离任务各自的成果分支，以及汇总里的查看和合并命令](docs/images/isolation.png)
 
 ## 🖥️ 任务面板
 

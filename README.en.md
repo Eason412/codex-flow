@@ -23,6 +23,8 @@ Current version: [V0.4.0](https://github.com/Eason412/codex-flow/releases/tag/V0
 
 ## ⚙️ How it works
 
+![Left: the conversation and panel while tasks run. Right: the summary after the run](docs/images/overview.en.png)
+
 ```text
 Claude Code main conversation
  ├─ run.sh ──────────────────────► codex exec              one task
@@ -55,10 +57,14 @@ Claude Code main conversation
 
 Parallel writes are handled as in Claude's Workflow: the orchestrator splits tasks by file, dependent tasks run in order, and worktrees are used only when several tasks must change the same files at once. The basis is the file ownership requirement in Claude Code's agent teams documentation and a conflict study of 33,596 agent pull requests: worktrees only postpone conflicts to merge time, and conflicts drop when work is split by file, merged one at a time and checked early.
 
+![“fix timeout” has after, so it starts as soon as “find timeout cause” finishes; “tune pool config” overlaps the writes of “fix memory leak”, so it waits for it to finish](docs/images/timeline.en.png)
+
 - **Write scope queueing**: A task with `writes` whose scope overlaps a running task waits until that task ends, as if `after` had been added. Tasks without `writes` run in parallel as usual, with a note at start suggesting a scope.
 - **Same-file edit notes**: When two concurrently running tasks change the same file, the summary carries a line for each, and Claude decides whether to rerun the one that finished first. Detection relies on Codex's file-change records, which do not include files written by shell commands.
 - **Worktree isolation (optional)**: A task with `isolation: "worktree"` runs and is checked in its own worktree, matching `isolation: 'worktree'` in Claude's Workflow. If it changes anything, the result is saved on branch `codex-flow/<runId>/<task>`, the summary gives commands to view and merge it, and Claude merges after review; nothing is kept when nothing changes. Set at the plan level it becomes the default, and a single task opts out with `false`.
 - **Cost and limits of isolation**: Each isolated task takes a full checkout (about 1 second and 240 MB for an 8.5k-file repository), with at most 4 at once (`CODEX_FLOW_MAX_WORKTREES`). Tasks after an isolated task do not see its changes, so hand-offs should run in order, or in two runs with a merge in between. Ignored files stay off the result branch; the worktree directory is removed once the branch is saved, and `keepWorktree: true` keeps it.
+
+![The result branches of two isolated tasks, and the view and merge commands from the summary](docs/images/isolation.en.png)
 
 ## 🖥️ Task panel
 
