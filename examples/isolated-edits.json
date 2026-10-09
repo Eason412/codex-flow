@@ -1,0 +1,30 @@
+{
+  "name": "isolated-name-implementations",
+  "why": "需要比较同一名称契约的两个独立实现，两者都要改相同文件；隔离运行后由 Claude 选一个成果。",
+  "isolation": "worktree",
+  "phases": [{
+    "title": "实现名称去重候选",
+    "tasks": [
+      {
+        "label": "集合实现",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "pick": "default",
+        "schema": "report",
+        "promptFile": "prompts/names-set.md",
+        "writes": ["packages/names/index.mjs", "packages/names/index.test.mjs"],
+        "checks": ["node --test packages/names/index.test.mjs"]
+      },
+      {
+        "label": "数组实现",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "pick": "default",
+        "schema": "report",
+        "promptFile": "prompts/names-array.md",
+        "writes": ["packages/names/index.mjs", "packages/names/index.test.mjs"],
+        "checks": ["node --test packages/names/index.test.mjs"]
+      }
+    ]
+  }]
+}

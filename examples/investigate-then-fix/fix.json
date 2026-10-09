@@ -1,0 +1,29 @@
+{
+  "name": "fix-module-failures",
+  "why": "Claude 已核对定位结果并确定两份模块契约，两个互不调用的模块可以分别修复与验收。",
+  "phases": [{
+    "title": "修复名称整理与区间计算",
+    "tasks": [
+      {
+        "label": "名称修复",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "pick": "default",
+        "schema": "report",
+        "promptFile": "../prompts/fix-names.md",
+        "writes": ["packages/names/index.mjs", "packages/names/index.test.mjs"],
+        "checks": ["node --test packages/names/index.test.mjs"]
+      },
+      {
+        "label": "区间修复",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "pick": "default",
+        "schema": "report",
+        "promptFile": "../prompts/fix-ranges.md",
+        "writes": ["packages/ranges/index.mjs", "packages/ranges/index.test.mjs"],
+        "checks": ["node --test packages/ranges/index.test.mjs"]
+      }
+    ]
+  }]
+}

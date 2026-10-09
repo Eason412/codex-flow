@@ -154,6 +154,10 @@ Claude Code 主对话
 | [mod/](mod/) | 任务面板 mod 及其测试 |
 | [schemas/](schemas/) | 内置的 `review`、`opinion`、`result`、`report` 返回格式 |
 | [models.json](models.json) | 允许的模型与 effort、默认使用 Fast 的模型 |
+| [docs/architecture.md](docs/architecture.md) | 面向开发者的架构说明：模块关系、运行目录、生命周期与停止续跑 |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | 按现象查找的排障说明 |
+| [examples/](examples/) | 可运行的计划示例与练习项目 |
+| [LICENSE](LICENSE) | Apache-2.0 许可证全文 |
 
 ## 🤝 贡献须知
 
@@ -162,3 +166,7 @@ Claude Code 主对话
 - **范围**：一个 PR 只解决一个问题，不夹带个人配置或无关的格式调整。
 - **测试**：修改执行器后运行 `node --test flow/tests/`，修改 mod 后运行 `claude plugin validate mod` 与 `claude plugin test mod`。执行器测试使用模拟 Codex 与临时目录，不调用真实 Codex。
 - **信息保护**：提交前检查 diff、日志与截图，去除账号信息、私人路径与任务内容。
+
+## 📄 许可证
+
+本项目以 [Apache-2.0](LICENSE) 许可证发布。

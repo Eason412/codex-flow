@@ -154,6 +154,10 @@ Run the `.mjs` commands with `node`; paths are relative to `~/.claude/skills/cod
 | [mod/](mod/) | Task panel mod and its tests |
 | [schemas/](schemas/) | Built-in `review`, `opinion`, `result` and `report` reply formats |
 | [models.json](models.json) | Allowed models and efforts, and the models that use Fast by default |
+| [docs/architecture.en.md](docs/architecture.en.md) | Architecture for developers: components, run directory, lifecycle, stop and resume |
+| [docs/troubleshooting.en.md](docs/troubleshooting.en.md) | Troubleshooting by symptom |
+| [examples/](examples/) | Runnable plan examples and a practice project |
+| [LICENSE](LICENSE) | Full text of the Apache-2.0 license |
 
 ## 🤝 Contributing
 
@@ -162,3 +166,7 @@ Compatibility fixes, improvements and documentation edits are welcome. Before op
 - **Scope**: One PR solves one problem, without personal settings or unrelated formatting changes.
 - **Tests**: After changing the executor, run `node --test flow/tests/`; after changing the mod, run `claude plugin validate mod` and `claude plugin test mod`. The executor tests use a simulated Codex and temporary directories and never call the real Codex.
 - **Privacy**: Check diffs, logs and screenshots before committing, and remove account details, personal paths and task content.
+
+## 📄 License
+
+This project is released under the [Apache-2.0](LICENSE) license.

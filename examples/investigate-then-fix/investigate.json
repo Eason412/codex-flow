@@ -1,0 +1,29 @@
+{
+  "name": "investigate-module-failures",
+  "why": "两个模块的失败可以分别复现与核对，只收集原因证据，修法由 Claude 读完结果后决定。",
+  "phases": [{
+    "title": "定位名称与区间失败原因",
+    "tasks": [
+      {
+        "label": "名称证据",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "pick": "default",
+        "schema": "report",
+        "promptFile": "investigate-names.md",
+        "reads": ["packages/names"],
+        "writes": []
+      },
+      {
+        "label": "区间证据",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "pick": "default",
+        "schema": "report",
+        "promptFile": "investigate-ranges.md",
+        "reads": ["packages/ranges"],
+        "writes": []
+      }
+    ]
+  }]
+}
