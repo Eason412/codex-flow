@@ -117,8 +117,10 @@ test('排队中的任务被要求停止时不再开跑；只有标题的结果�
     { label: '后', ...sol, writes: ['a'], prompt: '后' },
   ] }] });
   const flow = background(['run', file], fakePath({ FAKE_SLOW_MS: '1500' }));
-  // 「后」排在「前」后面：「前」开跑后写停止文件
-  for (let i = 0; i < 100 && taskOf(lastRunOrNull() ?? { tasks: [] }, '前')?.status !== 'running'; i++) await sleep(50);
+  // 「后」排在「前」后面：等「后」记下排队再写停止文件。「前」开跑时先单独存一次 state，
+  // 那时「后」还没轮到排队，只等「前」running 会读到没有 waiting 的快照
+  for (let i = 0; i < 100 && !taskOf(lastRunOrNull() ?? { tasks: [] }, '后')?.waiting; i++) await sleep(50);
+  assert.equal(taskOf(lastRun().state, '前').status, 'running');
   const { dir } = lastRun();
   assert.deepEqual(taskOf(lastRun().state, '后').waiting, ['前']);
   assert.equal(command(['cancel', lastRun().state.runId, '后']).status, 0);
