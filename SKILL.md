@@ -1,6 +1,6 @@
 ---
 name: codex
-description: "把工作交给 Codex CLI：繁琐、能拆成多个并行任务、有命令可验收的工作用 codex-flow；Astra 的写前讨论、独立审查和对已结束任务的续接补做用 run.sh 单发。每次指定模型和 effort，并报告 Codex 实际使用的值。不用于一两步的小改、依赖本次对话上下文或要用户拍板的事、审美判断。"
+description: "只在用户点名 Codex CLI、Codex Flow、codex-flow 或 run.sh 时使用：多任务并行执行（codex-flow）、Astra 写前讨论与独立审查、对已结束任务的续接补做（run.sh 单发）。每次指定模型和 effort，并报告 Codex 实际使用的值。"
 ---
 
 项目规则另定了 Codex 渠道或分工时，以项目规则为准。
